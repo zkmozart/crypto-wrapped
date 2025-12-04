@@ -173,49 +173,43 @@ async function fetchSolanaData(address, startDate) {
         console.warn('Failed to fetch token metadata:', metaErr);
       }
 
-      // Fetch current prices from Jupiter Price API v1 (public)
+      // Get SOL and USDC prices from CoinGecko first
       try {
-        const mintList = Array.from(mints).slice(0, 50).join(',');
-        // Use the public v1 endpoint
-        const priceResponse = await fetch(`https://price.jup.ag/v6/price?ids=${mintList}`);
-        const priceData = await priceResponse.json();
-        console.log('Jupiter price data:', priceData);
+        const cgResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana,usd-coin&vs_currencies=usd');
+        const cgData = await cgResponse.json();
+        if (cgData.solana?.usd) tokenPrices['So11111111111111111111111111111111111111112'] = cgData.solana.usd;
+        if (cgData['usd-coin']?.usd) tokenPrices['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'] = cgData['usd-coin'].usd;
+      } catch (cgErr) {
+        console.warn('CoinGecko failed:', cgErr);
+        tokenPrices['So11111111111111111111111111111111111111112'] = 200;
+      }
 
-        if (priceData.data) {
-          Object.entries(priceData.data).forEach(([mint, data]) => {
-            if (data.price) {
-              tokenPrices[mint] = parseFloat(data.price);
-            }
-          });
-        }
-      } catch (priceErr) {
-        console.warn('Failed to fetch token prices from Jupiter:', priceErr);
+      // Fetch prices for other tokens from DexScreener (free, no auth)
+      const mintArray = Array.from(mints).filter(m =>
+        m !== 'So11111111111111111111111111111111111111112' &&
+        m !== 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+      );
 
-        // Fallback to CoinGecko for major tokens
+      // DexScreener allows batch lookups
+      for (const mint of mintArray.slice(0, 20)) {
         try {
-          const cgResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana,usd-coin&vs_currencies=usd');
-          const cgData = await cgResponse.json();
-          if (cgData.solana?.usd) tokenPrices['So11111111111111111111111111111111111111112'] = cgData.solana.usd;
-          if (cgData['usd-coin']?.usd) tokenPrices['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'] = cgData['usd-coin'].usd;
-          console.log('CoinGecko fallback prices:', tokenPrices);
-        } catch (cgErr) {
-          console.warn('CoinGecko fallback failed:', cgErr);
+          const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+          const dexData = await dexRes.json();
+          if (dexData.pairs && dexData.pairs.length > 0) {
+            // Get price from the most liquid pair
+            const topPair = dexData.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+            if (topPair.priceUsd) {
+              tokenPrices[mint] = parseFloat(topPair.priceUsd);
+            }
+          }
+        } catch (dexErr) {
+          // Skip this token
         }
       }
+
+      console.log('Token prices fetched:', tokenPrices);
     }
 
-    // Add SOL price if not already set
-    if (!tokenPrices['So11111111111111111111111111111111111111112']) {
-      try {
-        const solPriceRes = await fetch('https://price.jup.ag/v6/price?ids=So11111111111111111111111111111111111111112');
-        const solPriceData = await solPriceRes.json();
-        if (solPriceData.data?.So11111111111111111111111111111111111111112?.price) {
-          tokenPrices['So11111111111111111111111111111111111111112'] = parseFloat(solPriceData.data.So11111111111111111111111111111111111111112.price);
-        }
-      } catch (e) {
-        tokenPrices['So11111111111111111111111111111111111111112'] = 200; // Fallback
-      }
-    }
     tokenPrices['SOL'] = tokenPrices['So11111111111111111111111111111111111111112'] || 200;
 
     console.log('Mint to symbol map:', mintMetadata);
