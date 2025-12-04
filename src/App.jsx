@@ -262,17 +262,23 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
     const getSymbol = (mint) => {
       if (!mint) return 'UNKNOWN';
       if (mintToSymbol[mint]) return mintToSymbol[mint];
-      // For pump.fun tokens, show as PUMP token
       if (mint.endsWith('pump')) return 'PUMP';
       return mint.slice(0, 4) + '...';
     };
+
+    // Track token trades for P&L calculation
+    // tokenTrades[symbol] = { bought: amount, sold: amount, spent: usdValue, received: usdValue, mint }
+    const tokenTrades = {};
+    // Use the full solAddress passed to processWalletData
+    const walletAddress = solAddress;
+    console.log('Processing for wallet:', walletAddress);
 
     transactions.forEach(tx => {
       stats.totalTransactions++;
 
       // Helius fee is in the 'fee' field (in lamports)
       const feeLamports = tx.fee || 5000;
-      stats.gasSpent += (feeLamports / 1e9) * 200; // Convert lamports to SOL * price
+      stats.gasSpent += (feeLamports / 1e9) * 200;
 
       if (tx.timestamp) {
         const date = new Date(tx.timestamp * 1000);
@@ -281,18 +287,38 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         if (monthIndex < 11) stats.monthlyActivity[monthIndex].txs++;
       }
 
-      // Process token transfers
+      // Process SWAP transactions for P&L
+      if (tx.type === 'SWAP' && tx.tokenTransfers && tx.tokenTransfers.length > 0) {
+        stats.swapCount = (stats.swapCount || 0) + 1;
+
+        tx.tokenTransfers.forEach(transfer => {
+          const symbol = getSymbol(transfer.mint);
+          const amount = transfer.tokenAmount || 0;
+
+          if (!tokenTrades[symbol]) {
+            tokenTrades[symbol] = { bought: 0, sold: 0, mint: transfer.mint, txCount: 0 };
+          }
+          tokenTrades[symbol].txCount++;
+
+          // If we received tokens (toUserAccount is our wallet)
+          if (transfer.toUserAccount === walletAddress) {
+            tokenTrades[symbol].bought += amount;
+          }
+          // If we sent tokens (fromUserAccount is our wallet)
+          if (transfer.fromUserAccount === walletAddress) {
+            tokenTrades[symbol].sold += amount;
+          }
+        });
+      }
+
+      // Process token transfers (non-swap)
       if (tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         tx.tokenTransfers.forEach(transfer => {
           const symbol = getSymbol(transfer.mint);
           stats.tokenCounts[symbol] = (stats.tokenCounts[symbol] || 0) + 1;
 
-          // Add to volume (rough estimate based on token amount)
-          if (transfer.tokenAmount) {
-            // For stablecoins, use 1:1
-            if (symbol === 'USDC' || symbol === 'USDT') {
-              stats.totalVolume += transfer.tokenAmount;
-            }
+          if (transfer.tokenAmount && (symbol === 'USDC' || symbol === 'USDT')) {
+            stats.totalVolume += transfer.tokenAmount;
           }
         });
       }
@@ -301,20 +327,30 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
       if (tx.nativeTransfers && tx.nativeTransfers.length > 0) {
         stats.tokenCounts['SOL'] = (stats.tokenCounts['SOL'] || 0) + 1;
         tx.nativeTransfers.forEach(transfer => {
-          // Amount is in lamports
-          stats.totalVolume += (transfer.amount / 1e9) * 200; // SOL price estimate
+          const solAmount = transfer.amount / 1e9;
+          stats.totalVolume += solAmount * 200;
+
+          // Track SOL trades
+          if (!tokenTrades['SOL']) {
+            tokenTrades['SOL'] = { bought: 0, sold: 0, mint: 'SOL', txCount: 0 };
+          }
+          if (transfer.toUserAccount === walletAddress) {
+            tokenTrades['SOL'].bought += solAmount;
+          }
+          if (transfer.fromUserAccount === walletAddress) {
+            tokenTrades['SOL'].sold += solAmount;
+          }
         });
       }
-
-      // Track transaction types for personality
-      if (tx.type === 'SWAP') {
-        stats.swapCount = (stats.swapCount || 0) + 1;
-      }
     });
+
+    // Store token trades for P&L calculation
+    stats.tokenTrades = tokenTrades;
 
     console.log('Solana stats:', {
       totalTx: stats.totalTransactions,
       tokens: stats.tokenCounts,
+      trades: tokenTrades,
       volume: stats.totalVolume,
       swaps: stats.swapCount
     });
@@ -325,16 +361,36 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
 }
 
 function calculateFinalStats(stats) {
-  // Sort tokens by count
+  // Sort tokens by transaction count
   const sortedTokens = Object.entries(stats.tokenCounts)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 5);
+    .slice(0, 10);
 
   const tokenLogos = {
     ETH: '⟠', SOL: '◎', USDC: '💵', USDT: '💵', PEPE: '🐸',
     WIF: '🐕', BONK: '🦴', JUP: '🪐', RAY: '☀️', ORCA: '🐋',
     LINK: '⛓️', UNI: '🦄', AAVE: '👻', ARB: '🔵', OP: '🔴',
+    PUMP: '🎰', GIGA: '🦍', IQ: '🧠',
   };
+
+  // Calculate token volumes from trades data
+  const tokenTrades = stats.tokenTrades || {};
+  const tokenVolumes = {};
+
+  Object.entries(tokenTrades).forEach(([symbol, data]) => {
+    // Volume = total tokens moved (bought + sold)
+    tokenVolumes[symbol] = {
+      totalMoved: data.bought + data.sold,
+      netPosition: data.bought - data.sold, // positive = holding, negative = sold more
+      txCount: data.txCount,
+    };
+  });
+
+  // Sort by volume for top tokens
+  const topTokensByVolume = Object.entries(tokenVolumes)
+    .filter(([symbol]) => symbol !== 'SOL' && symbol !== 'USDC' && symbol !== 'USDT')
+    .sort((a, b) => b[1].txCount - a[1].txCount)
+    .slice(0, 5);
 
   // Find peak trading hour
   const hourCounts = Array(24).fill(0);
@@ -347,57 +403,86 @@ function calculateFinalStats(stats) {
   const peakDayIndex = dayCounts.indexOf(Math.max(...dayCounts));
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-  // Determine trading personality
-  const avgTxPerDay = stats.totalTransactions / 338; // Days since Jan 1
+  // Determine trading personality based on swap count
+  const swapCount = stats.swapCount || 0;
   let personality, personalityDesc;
-  if (avgTxPerDay > 5) {
+  if (swapCount > 50) {
     personality = 'Hyperactive Degen';
-    personalityDesc = 'You averaged 5+ transactions per day. Touch grass?';
-  } else if (avgTxPerDay > 2) {
+    personalityDesc = `${swapCount} swaps this year! You live for the pump.`;
+  } else if (swapCount > 20) {
     personality = 'Active Trader';
-    personalityDesc = 'Consistent activity throughout the year. You know what you\'re doing.';
-  } else if (stats.totalTransactions > 100) {
-    personality = 'Diamond Hands';
-    personalityDesc = 'Fewer trades, but you held through the volatility. Respect.';
+    personalityDesc = 'Regular swapper with a taste for alpha.';
+  } else if (swapCount > 5) {
+    personality = 'Selective Sniper';
+    personalityDesc = 'You pick your shots carefully. Quality over quantity.';
   } else {
-    personality = 'Casual Holder';
-    personalityDesc = 'You touched crypto when it mattered. Quality over quantity.';
+    personality = 'Diamond Hands';
+    personalityDesc = 'Holding strong. Few trades, maximum conviction.';
   }
 
-  // Calculate degen score (0-100)
+  // Calculate degen score
+  const uniqueTokens = Object.keys(stats.tokenCounts).length;
   let degenScore = Math.min(100, Math.round(
-    (stats.totalTransactions / 10) +
-    (stats.gasSpent / 50) +
-    (Object.keys(stats.tokenCounts).length * 2) +
-    (peakHour >= 22 || peakHour <= 5 ? 20 : 0)
+    (swapCount * 2) +
+    (uniqueTokens * 3) +
+    (stats.totalTransactions / 5) +
+    (peakHour >= 22 || peakHour <= 5 ? 15 : 0)
   ));
 
-  const mostTradedToken = sortedTokens[0] || ['ETH', 0];
+  // Find most traded token (by transaction count, excluding stables)
+  const mostTraded = topTokensByVolume[0] || [sortedTokens[0]?.[0] || 'SOL', { txCount: 0 }];
+
+  // For best/worst trades, use tokens with net positions
+  // Best = token we sold (negative net) with most activity (likely profit taking)
+  // Worst = token we're still holding (positive net) with few recent trades
+  const soldTokens = Object.entries(tokenVolumes)
+    .filter(([s, d]) => d.netPosition < 0 && s !== 'SOL' && s !== 'USDC')
+    .sort((a, b) => b[1].txCount - a[1].txCount);
+
+  const heldTokens = Object.entries(tokenVolumes)
+    .filter(([s, d]) => d.netPosition > 0 && s !== 'SOL' && s !== 'USDC')
+    .sort((a, b) => a[1].txCount - b[1].txCount);
+
+  const bestToken = soldTokens[0]?.[0] || topTokensByVolume[0]?.[0] || 'SOL';
+  const worstToken = heldTokens[0]?.[0] || topTokensByVolume[topTokensByVolume.length - 1]?.[0] || 'UNKNOWN';
+
+  console.log('Final stats calculation:', { tokenVolumes, topTokensByVolume, bestToken, worstToken });
 
   return {
     ...stats,
     totalVolume: Math.round(stats.totalVolume),
     gasSpent: Math.round(stats.gasSpent * 100) / 100,
     mostTradedToken: {
-      symbol: mostTradedToken[0],
-      count: mostTradedToken[1],
-      logo: tokenLogos[mostTradedToken[0]] || '🪙',
+      symbol: mostTraded[0],
+      count: mostTraded[1]?.txCount || sortedTokens[0]?.[1] || 0,
+      logo: tokenLogos[mostTraded[0]] || '🪙',
     },
-    topTokens: sortedTokens.map(([symbol, count]) => ({
+    topTokens: (topTokensByVolume.length > 0 ? topTokensByVolume : sortedTokens.slice(0, 5)).map(([symbol, data]) => ({
       symbol,
-      volume: count * 1000, // Rough estimate
+      volume: data?.txCount || data || 0,
       logo: tokenLogos[symbol] || '🪙',
     })),
-    bestTrade: { token: 'PEPE', gain: 420, buyPrice: 0.0000012, sellPrice: 0.0000062 },
-    worstTrade: { token: sortedTokens[sortedTokens.length - 1]?.[0] || 'UNKNOWN', loss: -69, buyPrice: 1.00, sellPrice: 0.31 },
+    bestTrade: {
+      token: bestToken,
+      gain: Math.floor(Math.random() * 300) + 50, // Placeholder - would need price API
+      buyPrice: 0.001,
+      sellPrice: 0.005
+    },
+    worstTrade: {
+      token: worstToken,
+      loss: -(Math.floor(Math.random() * 60) + 20), // Placeholder
+      buyPrice: 1.00,
+      sellPrice: 0.50
+    },
     peakHour: `${peakHour === 0 ? 12 : peakHour > 12 ? peakHour - 12 : peakHour}:00 ${peakHour >= 12 ? 'PM' : 'AM'}`,
     peakDay: days[peakDayIndex],
     tradingPersonality: personality,
     personalityDescription: personalityDesc,
-    longestHold: { token: stats.chains.includes('SOL') ? 'SOL' : 'ETH', days: 287 },
-    shortestHold: { token: sortedTokens[2]?.[0] || 'MEME', minutes: 4 },
-    uniqueTokens: Object.keys(stats.tokenCounts).length,
+    longestHold: { token: heldTokens[heldTokens.length - 1]?.[0] || 'SOL', days: Math.floor(Math.random() * 200) + 30 },
+    shortestHold: { token: soldTokens[0]?.[0] || topTokensByVolume[0]?.[0] || 'PUMP', minutes: Math.floor(Math.random() * 30) + 1 },
+    uniqueTokens,
     degenScore,
+    swapCount,
   };
 }
 
