@@ -209,9 +209,10 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
   if (solData) {
     const { transactions = [] } = solData;
 
-    // Log first transaction to see structure
+    // Log first few transactions to see structure
     if (transactions.length > 0) {
-      console.log('Sample Helius transaction structure:', transactions[0]);
+      console.log('Sample Helius tx (full):', JSON.stringify(transactions[0], null, 2));
+      console.log('Sample SWAP tx:', transactions.find(t => t.type === 'SWAP'));
     }
 
     transactions.forEach(tx => {
