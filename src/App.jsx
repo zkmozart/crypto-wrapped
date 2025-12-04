@@ -173,10 +173,11 @@ async function fetchSolanaData(address, startDate) {
         console.warn('Failed to fetch token metadata:', metaErr);
       }
 
-      // Fetch current prices from Jupiter
+      // Fetch current prices from Jupiter Price API v1 (public)
       try {
         const mintList = Array.from(mints).slice(0, 50).join(',');
-        const priceResponse = await fetch(`https://api.jup.ag/price/v2?ids=${mintList}`);
+        // Use the public v1 endpoint
+        const priceResponse = await fetch(`https://price.jup.ag/v6/price?ids=${mintList}`);
         const priceData = await priceResponse.json();
         console.log('Jupiter price data:', priceData);
 
@@ -188,20 +189,34 @@ async function fetchSolanaData(address, startDate) {
           });
         }
       } catch (priceErr) {
-        console.warn('Failed to fetch token prices:', priceErr);
+        console.warn('Failed to fetch token prices from Jupiter:', priceErr);
+
+        // Fallback to CoinGecko for major tokens
+        try {
+          const cgResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana,usd-coin&vs_currencies=usd');
+          const cgData = await cgResponse.json();
+          if (cgData.solana?.usd) tokenPrices['So11111111111111111111111111111111111111112'] = cgData.solana.usd;
+          if (cgData['usd-coin']?.usd) tokenPrices['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'] = cgData['usd-coin'].usd;
+          console.log('CoinGecko fallback prices:', tokenPrices);
+        } catch (cgErr) {
+          console.warn('CoinGecko fallback failed:', cgErr);
+        }
       }
     }
 
-    // Add SOL price
-    try {
-      const solPriceRes = await fetch('https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112');
-      const solPriceData = await solPriceRes.json();
-      if (solPriceData.data?.So11111111111111111111111111111111111111112?.price) {
-        tokenPrices['SOL'] = parseFloat(solPriceData.data.So11111111111111111111111111111111111111112.price);
+    // Add SOL price if not already set
+    if (!tokenPrices['So11111111111111111111111111111111111111112']) {
+      try {
+        const solPriceRes = await fetch('https://price.jup.ag/v6/price?ids=So11111111111111111111111111111111111111112');
+        const solPriceData = await solPriceRes.json();
+        if (solPriceData.data?.So11111111111111111111111111111111111111112?.price) {
+          tokenPrices['So11111111111111111111111111111111111111112'] = parseFloat(solPriceData.data.So11111111111111111111111111111111111111112.price);
+        }
+      } catch (e) {
+        tokenPrices['So11111111111111111111111111111111111111112'] = 200; // Fallback
       }
-    } catch (e) {
-      tokenPrices['SOL'] = 200; // Fallback
     }
+    tokenPrices['SOL'] = tokenPrices['So11111111111111111111111111111111111111112'] || 200;
 
     console.log('Mint to symbol map:', mintMetadata);
     console.log('Token prices:', tokenPrices);
