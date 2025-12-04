@@ -69,16 +69,16 @@ async function fetchEthereumData(address, startDate) {
   const startTimestamp = Math.floor(new Date(startDate).getTime() / 1000);
   
   try {
-    // Fetch normal transactions
+    // Fetch normal transactions (Etherscan V2 API)
     const txResponse = await fetch(
-      `https://api.etherscan.io/api?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&sort=desc&apikey=${apiKey}`
+      `https://api.etherscan.io/v2/api?chainid=1&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&sort=desc&apikey=${apiKey}`
     );
     const txData = await txResponse.json();
     console.log('Etherscan txData response:', txData);
 
-    // Fetch ERC-20 token transfers
+    // Fetch ERC-20 token transfers (Etherscan V2 API)
     const tokenResponse = await fetch(
-      `https://api.etherscan.io/api?module=account&action=tokentx&address=${address}&startblock=0&endblock=99999999&sort=desc&apikey=${apiKey}`
+      `https://api.etherscan.io/v2/api?chainid=1&module=account&action=tokentx&address=${address}&startblock=0&endblock=99999999&sort=desc&apikey=${apiKey}`
     );
     const tokenData = await tokenResponse.json();
     console.log('Etherscan tokenData response:', tokenData);
