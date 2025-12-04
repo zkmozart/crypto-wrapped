@@ -148,7 +148,10 @@ async function fetchSolanaData(address, startDate) {
 
     // Fetch token metadata for all mints
     let mintMetadata = {};
+    let tokenPrices = {};
+
     if (mints.size > 0) {
+      // Fetch metadata
       try {
         const metadataResponse = await fetch(`https://api.helius.xyz/v0/token-metadata?api-key=${apiKey}`, {
           method: 'POST',
@@ -156,7 +159,6 @@ async function fetchSolanaData(address, startDate) {
           body: JSON.stringify({ mintAccounts: Array.from(mints).slice(0, 100) })
         });
         const metadata = await metadataResponse.json();
-        console.log('Token metadata:', metadata);
 
         if (Array.isArray(metadata)) {
           metadata.forEach(m => {
@@ -170,8 +172,39 @@ async function fetchSolanaData(address, startDate) {
       } catch (metaErr) {
         console.warn('Failed to fetch token metadata:', metaErr);
       }
+
+      // Fetch current prices from Jupiter
+      try {
+        const mintList = Array.from(mints).slice(0, 50).join(',');
+        const priceResponse = await fetch(`https://api.jup.ag/price/v2?ids=${mintList}`);
+        const priceData = await priceResponse.json();
+        console.log('Jupiter price data:', priceData);
+
+        if (priceData.data) {
+          Object.entries(priceData.data).forEach(([mint, data]) => {
+            if (data.price) {
+              tokenPrices[mint] = parseFloat(data.price);
+            }
+          });
+        }
+      } catch (priceErr) {
+        console.warn('Failed to fetch token prices:', priceErr);
+      }
     }
+
+    // Add SOL price
+    try {
+      const solPriceRes = await fetch('https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112');
+      const solPriceData = await solPriceRes.json();
+      if (solPriceData.data?.So11111111111111111111111111111111111111112?.price) {
+        tokenPrices['SOL'] = parseFloat(solPriceData.data.So11111111111111111111111111111111111111112.price);
+      }
+    } catch (e) {
+      tokenPrices['SOL'] = 200; // Fallback
+    }
+
     console.log('Mint to symbol map:', mintMetadata);
+    console.log('Token prices:', tokenPrices);
 
     // Filter by date
     const startTimestamp = new Date(startDate).getTime() / 1000;
@@ -180,7 +213,7 @@ async function fetchSolanaData(address, startDate) {
     );
     console.log('Filtered Solana transactions (2025):', filteredTxs.length);
 
-    return { transactions: filteredTxs, mintMetadata, chain: 'SOL' };
+    return { transactions: filteredTxs, mintMetadata, tokenPrices, chain: 'SOL' };
   } catch (err) {
     console.error('Helius API error:', err);
     return getMockSolData();
@@ -243,7 +276,7 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
 
   // Process Solana data
   if (solData) {
-    const { transactions = [], mintMetadata = {} } = solData;
+    const { transactions = [], mintMetadata = {}, tokenPrices = {} } = solData;
 
     // Common Solana token mint addresses to symbols (fallback)
     const defaultMintToSymbol = {
@@ -258,6 +291,12 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
     // Merge fetched metadata with defaults
     const mintToSymbol = { ...defaultMintToSymbol, ...mintMetadata };
 
+    // Get price for a mint (returns USD price or 0)
+    const getPrice = (mint) => {
+      if (!mint) return 0;
+      return tokenPrices[mint] || 0;
+    };
+
     // Function to get symbol from mint
     const getSymbol = (mint) => {
       if (!mint) return 'UNKNOWN';
@@ -267,11 +306,13 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
     };
 
     // Track token trades for P&L calculation
-    // tokenTrades[symbol] = { bought: amount, sold: amount, spent: usdValue, received: usdValue, mint }
+    // tokenTrades[symbol] = { bought, sold, boughtUsd, soldUsd, mint, currentPrice }
     const tokenTrades = {};
-    // Use the full solAddress passed to processWalletData
     const walletAddress = solAddress;
+    const solPrice = tokenPrices['SOL'] || 200;
+
     console.log('Processing for wallet:', walletAddress);
+    console.log('SOL price:', solPrice);
 
     transactions.forEach(tx => {
       stats.totalTransactions++;
@@ -294,19 +335,30 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         tx.tokenTransfers.forEach(transfer => {
           const symbol = getSymbol(transfer.mint);
           const amount = transfer.tokenAmount || 0;
+          const price = getPrice(transfer.mint);
+          const usdValue = amount * price;
 
           if (!tokenTrades[symbol]) {
-            tokenTrades[symbol] = { bought: 0, sold: 0, mint: transfer.mint, txCount: 0 };
+            tokenTrades[symbol] = {
+              bought: 0, sold: 0,
+              boughtUsd: 0, soldUsd: 0,
+              mint: transfer.mint,
+              currentPrice: price,
+              txCount: 0
+            };
           }
           tokenTrades[symbol].txCount++;
+          tokenTrades[symbol].currentPrice = price; // Update to latest price
 
           // If we received tokens (toUserAccount is our wallet)
           if (transfer.toUserAccount === walletAddress) {
             tokenTrades[symbol].bought += amount;
+            tokenTrades[symbol].boughtUsd += usdValue;
           }
           // If we sent tokens (fromUserAccount is our wallet)
           if (transfer.fromUserAccount === walletAddress) {
             tokenTrades[symbol].sold += amount;
+            tokenTrades[symbol].soldUsd += usdValue;
           }
         });
       }
@@ -315,10 +367,16 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
       if (tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         tx.tokenTransfers.forEach(transfer => {
           const symbol = getSymbol(transfer.mint);
+          const price = getPrice(transfer.mint);
           stats.tokenCounts[symbol] = (stats.tokenCounts[symbol] || 0) + 1;
 
-          if (transfer.tokenAmount && (symbol === 'USDC' || symbol === 'USDT')) {
-            stats.totalVolume += transfer.tokenAmount;
+          if (transfer.tokenAmount) {
+            const usdValue = transfer.tokenAmount * price;
+            if (symbol === 'USDC' || symbol === 'USDT') {
+              stats.totalVolume += transfer.tokenAmount;
+            } else if (price > 0) {
+              stats.totalVolume += usdValue;
+            }
           }
         });
       }
@@ -328,17 +386,26 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         stats.tokenCounts['SOL'] = (stats.tokenCounts['SOL'] || 0) + 1;
         tx.nativeTransfers.forEach(transfer => {
           const solAmount = transfer.amount / 1e9;
-          stats.totalVolume += solAmount * 200;
+          const usdValue = solAmount * solPrice;
+          stats.totalVolume += usdValue;
 
           // Track SOL trades
           if (!tokenTrades['SOL']) {
-            tokenTrades['SOL'] = { bought: 0, sold: 0, mint: 'SOL', txCount: 0 };
+            tokenTrades['SOL'] = {
+              bought: 0, sold: 0,
+              boughtUsd: 0, soldUsd: 0,
+              mint: 'SOL',
+              currentPrice: solPrice,
+              txCount: 0
+            };
           }
           if (transfer.toUserAccount === walletAddress) {
             tokenTrades['SOL'].bought += solAmount;
+            tokenTrades['SOL'].boughtUsd += usdValue;
           }
           if (transfer.fromUserAccount === walletAddress) {
             tokenTrades['SOL'].sold += solAmount;
+            tokenTrades['SOL'].soldUsd += usdValue;
           }
         });
       }
@@ -373,23 +440,68 @@ function calculateFinalStats(stats) {
     PUMP: '🎰', GIGA: '🦍', IQ: '🧠',
   };
 
-  // Calculate token volumes from trades data
+  // Calculate token volumes and P&L from trades data
   const tokenTrades = stats.tokenTrades || {};
   const tokenVolumes = {};
+  const tokenPnL = [];
 
   Object.entries(tokenTrades).forEach(([symbol, data]) => {
-    // Volume = total tokens moved (bought + sold)
+    const netTokens = data.bought - data.sold; // Positive = still holding
+    const totalVolumeUsd = data.boughtUsd + data.soldUsd;
+
+    // Calculate realized P&L (what we sold vs what portion we bought)
+    // If we sold tokens, compare sold USD to proportional bought USD
+    let realizedPnL = 0;
+    let unrealizedPnL = 0;
+
+    if (data.sold > 0 && data.bought > 0) {
+      // Average buy price per token
+      const avgBuyPrice = data.boughtUsd / data.bought;
+      // Cost basis of sold tokens
+      const costBasis = data.sold * avgBuyPrice;
+      // Realized P&L
+      realizedPnL = data.soldUsd - costBasis;
+    }
+
+    // Unrealized P&L for tokens still held
+    if (netTokens > 0 && data.currentPrice > 0) {
+      const avgBuyPrice = data.boughtUsd / data.bought;
+      const currentValue = netTokens * data.currentPrice;
+      const costBasis = netTokens * avgBuyPrice;
+      unrealizedPnL = currentValue - costBasis;
+    }
+
+    const totalPnL = realizedPnL + unrealizedPnL;
+    const pnlPercent = data.boughtUsd > 0 ? (totalPnL / data.boughtUsd) * 100 : 0;
+
     tokenVolumes[symbol] = {
       totalMoved: data.bought + data.sold,
-      netPosition: data.bought - data.sold, // positive = holding, negative = sold more
+      netPosition: netTokens,
       txCount: data.txCount,
+      volumeUsd: totalVolumeUsd,
+      realizedPnL,
+      unrealizedPnL,
+      totalPnL,
+      pnlPercent,
+      currentPrice: data.currentPrice,
     };
+
+    // Track for best/worst calculation (exclude stables and SOL for meme analysis)
+    if (symbol !== 'SOL' && symbol !== 'USDC' && symbol !== 'USDT' && data.txCount > 0) {
+      tokenPnL.push({ symbol, ...tokenVolumes[symbol] });
+    }
   });
+
+  // Sort by P&L for best/worst trades
+  const sortedByPnL = tokenPnL.sort((a, b) => b.totalPnL - a.totalPnL);
+  const sortedByPnLPercent = tokenPnL.sort((a, b) => b.pnlPercent - a.pnlPercent);
+
+  console.log('Token P&L:', tokenPnL);
 
   // Sort by volume for top tokens
   const topTokensByVolume = Object.entries(tokenVolumes)
     .filter(([symbol]) => symbol !== 'SOL' && symbol !== 'USDC' && symbol !== 'USDT')
-    .sort((a, b) => b[1].txCount - a[1].txCount)
+    .sort((a, b) => b[1].volumeUsd - a[1].volumeUsd || b[1].txCount - a[1].txCount)
     .slice(0, 5);
 
   // Find peak trading hour
@@ -432,21 +544,25 @@ function calculateFinalStats(stats) {
   // Find most traded token (by transaction count, excluding stables)
   const mostTraded = topTokensByVolume[0] || [sortedTokens[0]?.[0] || 'SOL', { txCount: 0 }];
 
-  // For best/worst trades, use tokens with net positions
-  // Best = token we sold (negative net) with most activity (likely profit taking)
-  // Worst = token we're still holding (positive net) with few recent trades
-  const soldTokens = Object.entries(tokenVolumes)
-    .filter(([s, d]) => d.netPosition < 0 && s !== 'SOL' && s !== 'USDC')
-    .sort((a, b) => b[1].txCount - a[1].txCount);
+  // Find best trade (highest % gain) and worst trade (lowest % / biggest loss)
+  const bestTrade = sortedByPnLPercent.find(t => t.pnlPercent > 0) || sortedByPnLPercent[0];
+  const worstTrade = [...sortedByPnLPercent].reverse().find(t => t.pnlPercent < 0) || sortedByPnLPercent[sortedByPnLPercent.length - 1];
 
-  const heldTokens = Object.entries(tokenVolumes)
-    .filter(([s, d]) => d.netPosition > 0 && s !== 'SOL' && s !== 'USDC')
-    .sort((a, b) => a[1].txCount - b[1].txCount);
+  // Find tokens still being held vs sold
+  const heldTokens = tokenPnL.filter(t => t.netPosition > 0);
+  const soldTokens = tokenPnL.filter(t => t.netPosition <= 0);
 
-  const bestToken = soldTokens[0]?.[0] || topTokensByVolume[0]?.[0] || 'SOL';
-  const worstToken = heldTokens[0]?.[0] || topTokensByVolume[topTokensByVolume.length - 1]?.[0] || 'UNKNOWN';
+  console.log('Final stats calculation:', {
+    tokenVolumes,
+    topTokensByVolume,
+    bestTrade,
+    worstTrade,
+    totalPnL: tokenPnL.reduce((sum, t) => sum + t.totalPnL, 0)
+  });
 
-  console.log('Final stats calculation:', { tokenVolumes, topTokensByVolume, bestToken, worstToken });
+  // Calculate total P&L across all tokens
+  const totalRealizedPnL = tokenPnL.reduce((sum, t) => sum + t.realizedPnL, 0);
+  const totalUnrealizedPnL = tokenPnL.reduce((sum, t) => sum + t.unrealizedPnL, 0);
 
   return {
     ...stats,
@@ -459,30 +575,36 @@ function calculateFinalStats(stats) {
     },
     topTokens: (topTokensByVolume.length > 0 ? topTokensByVolume : sortedTokens.slice(0, 5)).map(([symbol, data]) => ({
       symbol,
-      volume: data?.txCount || data || 0,
+      volume: data?.volumeUsd ? Math.round(data.volumeUsd) : (data?.txCount || data || 0),
+      pnl: data?.totalPnL ? Math.round(data.totalPnL) : 0,
       logo: tokenLogos[symbol] || '🪙',
     })),
-    bestTrade: {
-      token: bestToken,
-      gain: Math.floor(Math.random() * 300) + 50, // Placeholder - would need price API
-      buyPrice: 0.001,
-      sellPrice: 0.005
-    },
-    worstTrade: {
-      token: worstToken,
-      loss: -(Math.floor(Math.random() * 60) + 20), // Placeholder
-      buyPrice: 1.00,
-      sellPrice: 0.50
-    },
+    bestTrade: bestTrade ? {
+      token: bestTrade.symbol,
+      gain: Math.round(bestTrade.pnlPercent),
+      pnlUsd: Math.round(bestTrade.totalPnL),
+      buyPrice: bestTrade.volumeUsd > 0 ? (bestTrade.volumeUsd / bestTrade.totalMoved).toFixed(6) : 0,
+      sellPrice: bestTrade.currentPrice?.toFixed(6) || 0
+    } : { token: 'N/A', gain: 0, pnlUsd: 0, buyPrice: 0, sellPrice: 0 },
+    worstTrade: worstTrade ? {
+      token: worstTrade.symbol,
+      loss: Math.round(worstTrade.pnlPercent),
+      pnlUsd: Math.round(worstTrade.totalPnL),
+      buyPrice: worstTrade.volumeUsd > 0 ? (worstTrade.volumeUsd / worstTrade.totalMoved).toFixed(6) : 0,
+      sellPrice: worstTrade.currentPrice?.toFixed(6) || 0
+    } : { token: 'N/A', loss: 0, pnlUsd: 0, buyPrice: 0, sellPrice: 0 },
     peakHour: `${peakHour === 0 ? 12 : peakHour > 12 ? peakHour - 12 : peakHour}:00 ${peakHour >= 12 ? 'PM' : 'AM'}`,
     peakDay: days[peakDayIndex],
     tradingPersonality: personality,
     personalityDescription: personalityDesc,
-    longestHold: { token: heldTokens[heldTokens.length - 1]?.[0] || 'SOL', days: Math.floor(Math.random() * 200) + 30 },
-    shortestHold: { token: soldTokens[0]?.[0] || topTokensByVolume[0]?.[0] || 'PUMP', minutes: Math.floor(Math.random() * 30) + 1 },
+    longestHold: { token: heldTokens[0]?.symbol || 'SOL', days: Math.floor(Math.random() * 200) + 30 },
+    shortestHold: { token: soldTokens[0]?.symbol || topTokensByVolume[0]?.[0] || 'PUMP', minutes: Math.floor(Math.random() * 30) + 1 },
     uniqueTokens,
     degenScore,
     swapCount,
+    totalRealizedPnL: Math.round(totalRealizedPnL),
+    totalUnrealizedPnL: Math.round(totalUnrealizedPnL),
+    totalPnL: Math.round(totalRealizedPnL + totalUnrealizedPnL),
   };
 }
 
