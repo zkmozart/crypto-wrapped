@@ -74,16 +74,21 @@ async function fetchEthereumData(address, startDate) {
       `https://api.etherscan.io/api?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&sort=desc&apikey=${apiKey}`
     );
     const txData = await txResponse.json();
+    console.log('Etherscan txData response:', txData);
 
     // Fetch ERC-20 token transfers
     const tokenResponse = await fetch(
       `https://api.etherscan.io/api?module=account&action=tokentx&address=${address}&startblock=0&endblock=99999999&sort=desc&apikey=${apiKey}`
     );
     const tokenData = await tokenResponse.json();
+    console.log('Etherscan tokenData response:', tokenData);
 
     // Check if API returned an error or non-array result
     const txResults = Array.isArray(txData.result) ? txData.result : [];
     const tokenResults = Array.isArray(tokenData.result) ? tokenData.result : [];
+
+    console.log('Total txResults from API:', txResults.length);
+    console.log('Total tokenResults from API:', tokenResults.length);
 
     // Filter by date
     const transactions = txResults.filter(
@@ -92,6 +97,9 @@ async function fetchEthereumData(address, startDate) {
     const tokenTransfers = tokenResults.filter(
       tx => parseInt(tx.timeStamp) >= startTimestamp
     );
+
+    console.log('Filtered transactions (2025):', transactions.length);
+    console.log('Filtered tokenTransfers (2025):', tokenTransfers.length);
 
     return { transactions, tokenTransfers, chain: 'ETH' };
   } catch (err) {
