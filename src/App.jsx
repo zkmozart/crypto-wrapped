@@ -111,7 +111,9 @@ async function fetchEthereumData(address, startDate) {
 // Fetch Solana data via Helius
 async function fetchSolanaData(address, startDate) {
   const apiKey = import.meta.env.VITE_HELIUS_API_KEY;
-  
+
+  console.log('Helius API key present:', !!apiKey);
+
   if (!apiKey) {
     console.warn('No Helius API key found, using mock data');
     return getMockSolData();
@@ -119,19 +121,28 @@ async function fetchSolanaData(address, startDate) {
 
   try {
     // Fetch parsed transaction history
-    const response = await fetch(
-      `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${apiKey}&limit=100`
-    );
-    const transactions = await response.json();
+    const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${apiKey}&limit=100`;
+    console.log('Fetching Helius URL:', url.replace(apiKey, 'HIDDEN'));
 
-    // Check if API returned valid array
+    const response = await fetch(url);
+    const transactions = await response.json();
+    console.log('Helius response:', transactions);
+
+    // Check if API returned valid array or error
+    if (transactions.error) {
+      console.error('Helius API error:', transactions.error);
+      return getMockSolData();
+    }
+
     const txArray = Array.isArray(transactions) ? transactions : [];
+    console.log('Total Helius transactions:', txArray.length);
 
     // Filter by date
     const startTimestamp = new Date(startDate).getTime() / 1000;
     const filteredTxs = txArray.filter(
       tx => tx.timestamp >= startTimestamp
     );
+    console.log('Filtered Solana transactions (2025):', filteredTxs.length);
 
     return { transactions: filteredTxs, chain: 'SOL' };
   } catch (err) {
