@@ -126,7 +126,6 @@ async function fetchSolanaData(address, startDate) {
 
     const response = await fetch(url);
     const transactions = await response.json();
-    console.log('Helius response:', transactions);
 
     // Check if API returned valid array or error
     if (transactions.error) {
@@ -137,6 +136,43 @@ async function fetchSolanaData(address, startDate) {
     const txArray = Array.isArray(transactions) ? transactions : [];
     console.log('Total Helius transactions:', txArray.length);
 
+    // Collect unique mint addresses
+    const mints = new Set();
+    txArray.forEach(tx => {
+      if (tx.tokenTransfers) {
+        tx.tokenTransfers.forEach(t => {
+          if (t.mint) mints.add(t.mint);
+        });
+      }
+    });
+
+    // Fetch token metadata for all mints
+    let mintMetadata = {};
+    if (mints.size > 0) {
+      try {
+        const metadataResponse = await fetch(`https://api.helius.xyz/v0/token-metadata?api-key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mintAccounts: Array.from(mints).slice(0, 100) })
+        });
+        const metadata = await metadataResponse.json();
+        console.log('Token metadata:', metadata);
+
+        if (Array.isArray(metadata)) {
+          metadata.forEach(m => {
+            if (m.account && m.onChainMetadata?.metadata?.data?.symbol) {
+              mintMetadata[m.account] = m.onChainMetadata.metadata.data.symbol.replace(/\0/g, '').trim();
+            } else if (m.account && m.legacyMetadata?.symbol) {
+              mintMetadata[m.account] = m.legacyMetadata.symbol;
+            }
+          });
+        }
+      } catch (metaErr) {
+        console.warn('Failed to fetch token metadata:', metaErr);
+      }
+    }
+    console.log('Mint to symbol map:', mintMetadata);
+
     // Filter by date
     const startTimestamp = new Date(startDate).getTime() / 1000;
     const filteredTxs = txArray.filter(
@@ -144,7 +180,7 @@ async function fetchSolanaData(address, startDate) {
     );
     console.log('Filtered Solana transactions (2025):', filteredTxs.length);
 
-    return { transactions: filteredTxs, chain: 'SOL' };
+    return { transactions: filteredTxs, mintMetadata, chain: 'SOL' };
   } catch (err) {
     console.error('Helius API error:', err);
     return getMockSolData();
@@ -207,13 +243,29 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
 
   // Process Solana data
   if (solData) {
-    const { transactions = [] } = solData;
+    const { transactions = [], mintMetadata = {} } = solData;
 
-    // Log first few transactions to see structure
-    if (transactions.length > 0) {
-      console.log('Sample Helius tx (full):', JSON.stringify(transactions[0], null, 2));
-      console.log('Sample SWAP tx:', transactions.find(t => t.type === 'SWAP'));
-    }
+    // Common Solana token mint addresses to symbols (fallback)
+    const defaultMintToSymbol = {
+      'So11111111111111111111111111111111111111112': 'SOL',
+      'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
+      'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+      'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',
+      'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'WIF',
+      'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN': 'JUP',
+    };
+
+    // Merge fetched metadata with defaults
+    const mintToSymbol = { ...defaultMintToSymbol, ...mintMetadata };
+
+    // Function to get symbol from mint
+    const getSymbol = (mint) => {
+      if (!mint) return 'UNKNOWN';
+      if (mintToSymbol[mint]) return mintToSymbol[mint];
+      // For pump.fun tokens, show as PUMP token
+      if (mint.endsWith('pump')) return 'PUMP';
+      return mint.slice(0, 4) + '...';
+    };
 
     transactions.forEach(tx => {
       stats.totalTransactions++;
@@ -229,16 +281,23 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         if (monthIndex < 11) stats.monthlyActivity[monthIndex].txs++;
       }
 
-      // Helius uses 'tokenTransfers' array with 'mint' and 'tokenStandard' fields
+      // Process token transfers
       if (tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         tx.tokenTransfers.forEach(transfer => {
-          // Helius may have 'symbol' or we need to use mint address
-          const symbol = transfer.symbol || transfer.mint?.slice(0, 6) || 'UNKNOWN';
+          const symbol = getSymbol(transfer.mint);
           stats.tokenCounts[symbol] = (stats.tokenCounts[symbol] || 0) + 1;
+
+          // Add to volume (rough estimate based on token amount)
+          if (transfer.tokenAmount) {
+            // For stablecoins, use 1:1
+            if (symbol === 'USDC' || symbol === 'USDT') {
+              stats.totalVolume += transfer.tokenAmount;
+            }
+          }
         });
       }
 
-      // Also check nativeTransfers for SOL movements
+      // Process native SOL transfers
       if (tx.nativeTransfers && tx.nativeTransfers.length > 0) {
         stats.tokenCounts['SOL'] = (stats.tokenCounts['SOL'] || 0) + 1;
         tx.nativeTransfers.forEach(transfer => {
@@ -247,10 +306,17 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         });
       }
 
-      // Check transaction type
-      if (tx.type) {
-        console.log('Transaction type:', tx.type);
+      // Track transaction types for personality
+      if (tx.type === 'SWAP') {
+        stats.swapCount = (stats.swapCount || 0) + 1;
       }
+    });
+
+    console.log('Solana stats:', {
+      totalTx: stats.totalTransactions,
+      tokens: stats.tokenCounts,
+      volume: stats.totalVolume,
+      swaps: stats.swapCount
     });
   }
 
