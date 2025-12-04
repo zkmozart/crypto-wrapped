@@ -81,11 +81,15 @@ async function fetchEthereumData(address, startDate) {
     );
     const tokenData = await tokenResponse.json();
 
+    // Check if API returned an error or non-array result
+    const txResults = Array.isArray(txData.result) ? txData.result : [];
+    const tokenResults = Array.isArray(tokenData.result) ? tokenData.result : [];
+
     // Filter by date
-    const transactions = (txData.result || []).filter(
+    const transactions = txResults.filter(
       tx => parseInt(tx.timeStamp) >= startTimestamp
     );
-    const tokenTransfers = (tokenData.result || []).filter(
+    const tokenTransfers = tokenResults.filter(
       tx => parseInt(tx.timeStamp) >= startTimestamp
     );
 
@@ -112,9 +116,12 @@ async function fetchSolanaData(address, startDate) {
     );
     const transactions = await response.json();
 
+    // Check if API returned valid array
+    const txArray = Array.isArray(transactions) ? transactions : [];
+
     // Filter by date
     const startTimestamp = new Date(startDate).getTime() / 1000;
-    const filteredTxs = transactions.filter(
+    const filteredTxs = txArray.filter(
       tx => tx.timestamp >= startTimestamp
     );
 
