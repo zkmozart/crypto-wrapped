@@ -208,11 +208,19 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
   // Process Solana data
   if (solData) {
     const { transactions = [] } = solData;
-    
+
+    // Log first transaction to see structure
+    if (transactions.length > 0) {
+      console.log('Sample Helius transaction structure:', transactions[0]);
+    }
+
     transactions.forEach(tx => {
       stats.totalTransactions++;
-      stats.gasSpent += 0.000005 * 20; // SOL fee ~0.000005 SOL * $20
-      
+
+      // Helius fee is in the 'fee' field (in lamports)
+      const feeLamports = tx.fee || 5000;
+      stats.gasSpent += (feeLamports / 1e9) * 200; // Convert lamports to SOL * price
+
       if (tx.timestamp) {
         const date = new Date(tx.timestamp * 1000);
         stats.timestamps.push(date);
@@ -220,14 +228,27 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         if (monthIndex < 11) stats.monthlyActivity[monthIndex].txs++;
       }
 
-      // Count token interactions
-      if (tx.tokenTransfers) {
+      // Helius uses 'tokenTransfers' array with 'mint' and 'tokenStandard' fields
+      if (tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         tx.tokenTransfers.forEach(transfer => {
-          const symbol = transfer.tokenSymbol || 'SOL';
+          // Helius may have 'symbol' or we need to use mint address
+          const symbol = transfer.symbol || transfer.mint?.slice(0, 6) || 'UNKNOWN';
           stats.tokenCounts[symbol] = (stats.tokenCounts[symbol] || 0) + 1;
         });
-      } else {
+      }
+
+      // Also check nativeTransfers for SOL movements
+      if (tx.nativeTransfers && tx.nativeTransfers.length > 0) {
         stats.tokenCounts['SOL'] = (stats.tokenCounts['SOL'] || 0) + 1;
+        tx.nativeTransfers.forEach(transfer => {
+          // Amount is in lamports
+          stats.totalVolume += (transfer.amount / 1e9) * 200; // SOL price estimate
+        });
+      }
+
+      // Check transaction type
+      if (tx.type) {
+        console.log('Transaction type:', tx.type);
       }
     });
   }
