@@ -109,9 +109,12 @@ const createSlides = (data) => [
         <TrendingUp className="w-16 h-16 text-green-300 mb-6" />
         <p className="text-green-200 text-xl mb-2">Your best trade</p>
         <h1 className="text-5xl font-black text-white mb-4">{data.bestTrade.token}</h1>
-        <div className="text-6xl font-black text-green-400 mb-4">+{data.bestTrade.gain}%</div>
+        <div className="text-6xl font-black text-green-400 mb-2">+{data.bestTrade.gain}%</div>
+        <div className="text-3xl font-bold text-green-300 mb-4">
+          +${Math.abs(data.bestTrade.pnlUsd).toLocaleString()} USD
+        </div>
         <p className="text-green-200 text-sm opacity-70">
-          In: ${data.bestTrade.buyPrice} → Out: ${data.bestTrade.sellPrice}
+          Spent: ${data.bestTrade.totalSpentUsd?.toLocaleString() || 0} → Got: ${data.bestTrade.totalReceivedUsd?.toLocaleString() || 0}
         </p>
       </div>
     ),
@@ -124,7 +127,10 @@ const createSlides = (data) => [
         <TrendingDown className="w-16 h-16 text-gray-400 mb-6" />
         <p className="text-gray-400 text-xl mb-2">We don't talk about</p>
         <h1 className="text-5xl font-black text-white mb-4">{data.worstTrade.token}</h1>
-        <div className="text-5xl font-black text-red-500 mb-4">{data.worstTrade.loss}%</div>
+        <div className="text-5xl font-black text-red-500 mb-2">{data.worstTrade.loss}%</div>
+        <div className="text-3xl font-bold text-red-400 mb-4">
+          -${Math.abs(data.worstTrade.pnlUsd).toLocaleString()} USD
+        </div>
         <p className="text-gray-500 text-sm">It happens to the best of us</p>
       </div>
     ),
@@ -160,7 +166,7 @@ const createSlides = (data) => [
           <div className="bg-white/10 rounded-2xl p-6">
             <p className="text-cyan-200 text-sm mb-1">Shortest hold</p>
             <p className="text-3xl font-black text-white">{data.shortestHold.token}</p>
-            <p className="text-cyan-300">{data.shortestHold.minutes} minutes 📄</p>
+            <p className="text-cyan-300">{data.shortestHold.days} days 📄</p>
           </div>
         </div>
       </div>
@@ -194,8 +200,18 @@ const createSlides = (data) => [
               style={{ opacity: 1 - i * 0.12 }}
             >
               <span className="text-2xl w-10">{token.logo}</span>
-              <span className="text-xl font-bold text-white flex-1 text-left">{token.symbol}</span>
-              <span className="text-orange-200">${(token.volume / 1000).toFixed(0)}k</span>
+              <div className="flex-1 text-left">
+                <span className="text-xl font-bold text-white">{token.symbol}</span>
+                <div className="text-xs text-orange-300">
+                  {token.tradeCount} trade{token.tradeCount !== 1 ? 's' : ''} • {token.holdTimeDays}d hold
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-orange-200">${token.volume.toLocaleString()}</div>
+                <div className={`text-sm font-bold ${token.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {token.pnl >= 0 ? '+' : ''}{token.pnlPercent}% (${token.pnl >= 0 ? '+' : ''}{token.pnl.toLocaleString()})
+                </div>
+              </div>
             </div>
           ))}
         </div>

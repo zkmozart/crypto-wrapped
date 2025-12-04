@@ -314,8 +314,8 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
       return mint.slice(0, 4) + '...';
     };
 
-    // Track token trades for P&L calculation
-    // tokenTrades[symbol] = { bought, sold, boughtUsd, soldUsd, mint, currentPrice }
+    // Track token trades with timestamps for hold time and P&L
+    // tokenTrades[symbol] = { trades: [], mint, currentPrice }
     const tokenTrades = {};
     const walletAddress = solAddress;
     const solPrice = tokenPrices['SOL'] || 200;
@@ -323,12 +323,16 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
     console.log('Processing for wallet:', walletAddress);
     console.log('SOL price:', solPrice);
 
-    transactions.forEach(tx => {
+    // Sort transactions by timestamp (oldest first) for proper hold time calculation
+    const sortedTxs = [...transactions].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+    sortedTxs.forEach(tx => {
       stats.totalTransactions++;
+      const txTimestamp = tx.timestamp ? tx.timestamp * 1000 : Date.now();
 
       // Helius fee is in the 'fee' field (in lamports)
       const feeLamports = tx.fee || 5000;
-      stats.gasSpent += (feeLamports / 1e9) * 200;
+      stats.gasSpent += (feeLamports / 1e9) * solPrice;
 
       if (tx.timestamp) {
         const date = new Date(tx.timestamp * 1000);
@@ -337,42 +341,77 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         if (monthIndex < 11) stats.monthlyActivity[monthIndex].txs++;
       }
 
-      // Process SWAP transactions for P&L
+      // Process SWAP transactions - these are the key trades for P&L
       if (tx.type === 'SWAP' && tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         stats.swapCount = (stats.swapCount || 0) + 1;
 
+        // In a swap, we typically sell one token and buy another
+        // Track each token involved
         tx.tokenTransfers.forEach(transfer => {
           const symbol = getSymbol(transfer.mint);
           const amount = transfer.tokenAmount || 0;
           const price = getPrice(transfer.mint);
-          const usdValue = amount * price;
 
           if (!tokenTrades[symbol]) {
             tokenTrades[symbol] = {
-              bought: 0, sold: 0,
-              boughtUsd: 0, soldUsd: 0,
+              trades: [],
               mint: transfer.mint,
               currentPrice: price,
-              txCount: 0
+              totalBought: 0,
+              totalSold: 0,
+              totalSpentUsd: 0,  // USD spent to buy
+              totalReceivedUsd: 0, // USD received from selling
+              firstBuyTime: null,
+              lastSellTime: null,
+              holdingBalance: 0,
             };
           }
-          tokenTrades[symbol].txCount++;
-          tokenTrades[symbol].currentPrice = price; // Update to latest price
 
-          // If we received tokens (toUserAccount is our wallet)
-          if (transfer.toUserAccount === walletAddress) {
-            tokenTrades[symbol].bought += amount;
-            tokenTrades[symbol].boughtUsd += usdValue;
+          tokenTrades[symbol].currentPrice = price;
+
+          // Received tokens = BUY
+          if (transfer.toUserAccount === walletAddress && amount > 0) {
+            // For buys, we need to estimate what we paid
+            // In a swap, we usually pay SOL or stablecoin
+            // Estimate cost based on current price (not ideal but best we can do)
+            const estimatedCost = amount * price;
+
+            tokenTrades[symbol].trades.push({
+              type: 'buy',
+              amount,
+              pricePerToken: price,
+              usdValue: estimatedCost,
+              timestamp: txTimestamp
+            });
+            tokenTrades[symbol].totalBought += amount;
+            tokenTrades[symbol].totalSpentUsd += estimatedCost;
+            tokenTrades[symbol].holdingBalance += amount;
+
+            if (!tokenTrades[symbol].firstBuyTime) {
+              tokenTrades[symbol].firstBuyTime = txTimestamp;
+            }
           }
-          // If we sent tokens (fromUserAccount is our wallet)
-          if (transfer.fromUserAccount === walletAddress) {
-            tokenTrades[symbol].sold += amount;
-            tokenTrades[symbol].soldUsd += usdValue;
+
+          // Sent tokens = SELL
+          if (transfer.fromUserAccount === walletAddress && amount > 0) {
+            const saleValue = amount * price;
+
+            tokenTrades[symbol].trades.push({
+              type: 'sell',
+              amount,
+              pricePerToken: price,
+              usdValue: saleValue,
+              timestamp: txTimestamp
+            });
+            tokenTrades[symbol].totalSold += amount;
+            tokenTrades[symbol].totalReceivedUsd += saleValue;
+            tokenTrades[symbol].holdingBalance -= amount;
+            tokenTrades[symbol].lastSellTime = txTimestamp;
           }
         });
       }
 
-      // Process token transfers (non-swap)
+      // Process all token transfers for volume tracking
       if (tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         tx.tokenTransfers.forEach(transfer => {
           const symbol = getSymbol(transfer.mint);
@@ -397,25 +436,6 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
           const solAmount = transfer.amount / 1e9;
           const usdValue = solAmount * solPrice;
           stats.totalVolume += usdValue;
-
-          // Track SOL trades
-          if (!tokenTrades['SOL']) {
-            tokenTrades['SOL'] = {
-              bought: 0, sold: 0,
-              boughtUsd: 0, soldUsd: 0,
-              mint: 'SOL',
-              currentPrice: solPrice,
-              txCount: 0
-            };
-          }
-          if (transfer.toUserAccount === walletAddress) {
-            tokenTrades['SOL'].bought += solAmount;
-            tokenTrades['SOL'].boughtUsd += usdValue;
-          }
-          if (transfer.fromUserAccount === walletAddress) {
-            tokenTrades['SOL'].sold += solAmount;
-            tokenTrades['SOL'].soldUsd += usdValue;
-          }
         });
       }
     });
@@ -437,11 +457,6 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
 }
 
 function calculateFinalStats(stats) {
-  // Sort tokens by transaction count
-  const sortedTokens = Object.entries(stats.tokenCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-
   const tokenLogos = {
     ETH: '⟠', SOL: '◎', USDC: '💵', USDT: '💵', PEPE: '🐸',
     WIF: '🐕', BONK: '🦴', JUP: '🪐', RAY: '☀️', ORCA: '🐋',
@@ -449,69 +464,114 @@ function calculateFinalStats(stats) {
     PUMP: '🎰', GIGA: '🦍', IQ: '🧠',
   };
 
-  // Calculate token volumes and P&L from trades data
   const tokenTrades = stats.tokenTrades || {};
-  const tokenVolumes = {};
-  const tokenPnL = [];
+  const tokenAnalysis = [];
+  const now = Date.now();
 
+  // Analyze each token
   Object.entries(tokenTrades).forEach(([symbol, data]) => {
-    const netTokens = data.bought - data.sold; // Positive = still holding
-    const totalVolumeUsd = data.boughtUsd + data.soldUsd;
+    if (symbol === 'USDC' || symbol === 'USDT') return; // Skip stables
 
-    // Calculate realized P&L (what we sold vs what portion we bought)
-    // If we sold tokens, compare sold USD to proportional bought USD
+    const totalBought = data.totalBought || 0;
+    const totalSold = data.totalSold || 0;
+    const holdingBalance = data.holdingBalance || 0;
+    const currentPrice = data.currentPrice || 0;
+    const tradeCount = data.trades?.length || 0;
+
+    // Calculate USD values
+    const totalSpentUsd = data.totalSpentUsd || 0;
+    const totalReceivedUsd = data.totalReceivedUsd || 0;
+    const currentHoldingValueUsd = holdingBalance * currentPrice;
+
+    // Calculate P&L
+    // Realized P&L = what we received from sales - cost basis of sold tokens
     let realizedPnL = 0;
-    let unrealizedPnL = 0;
-
-    if (data.sold > 0 && data.bought > 0) {
-      // Average buy price per token
-      const avgBuyPrice = data.boughtUsd / data.bought;
-      // Cost basis of sold tokens
-      const costBasis = data.sold * avgBuyPrice;
-      // Realized P&L
-      realizedPnL = data.soldUsd - costBasis;
+    if (totalSold > 0 && totalBought > 0) {
+      const avgCostPerToken = totalSpentUsd / totalBought;
+      const costBasisSold = totalSold * avgCostPerToken;
+      realizedPnL = totalReceivedUsd - costBasisSold;
     }
 
-    // Unrealized P&L for tokens still held
-    if (netTokens > 0 && data.currentPrice > 0) {
-      const avgBuyPrice = data.boughtUsd / data.bought;
-      const currentValue = netTokens * data.currentPrice;
-      const costBasis = netTokens * avgBuyPrice;
-      unrealizedPnL = currentValue - costBasis;
+    // Unrealized P&L = current value of holdings - cost basis of holdings
+    let unrealizedPnL = 0;
+    if (holdingBalance > 0 && totalBought > 0) {
+      const avgCostPerToken = totalSpentUsd / totalBought;
+      const costBasisHeld = holdingBalance * avgCostPerToken;
+      unrealizedPnL = currentHoldingValueUsd - costBasisHeld;
     }
 
     const totalPnL = realizedPnL + unrealizedPnL;
-    const pnlPercent = data.boughtUsd > 0 ? (totalPnL / data.boughtUsd) * 100 : 0;
 
-    tokenVolumes[symbol] = {
-      totalMoved: data.bought + data.sold,
-      netPosition: netTokens,
-      txCount: data.txCount,
-      volumeUsd: totalVolumeUsd,
+    // Calculate P&L percentage based on total invested
+    const pnlPercent = totalSpentUsd > 0 ? (totalPnL / totalSpentUsd) * 100 : 0;
+
+    // Calculate hold time
+    let holdTimeMs = 0;
+    let holdTimeDays = 0;
+    if (data.firstBuyTime) {
+      const endTime = data.lastSellTime && holdingBalance <= 0 ? data.lastSellTime : now;
+      holdTimeMs = endTime - data.firstBuyTime;
+      holdTimeDays = Math.floor(holdTimeMs / (1000 * 60 * 60 * 24));
+    }
+
+    // Check if ever held more than $1
+    const maxHoldingValue = Math.max(totalSpentUsd, currentHoldingValueUsd);
+    const heldSignificantValue = maxHoldingValue >= 1;
+
+    // Calculate ranking score
+    // Higher USD volume = better (positive)
+    // More trades = worse (negative impact)
+    // Longer hold time with significant value = better (positive)
+    const volumeScore = totalSpentUsd + totalReceivedUsd;
+    const tradeCountPenalty = tradeCount > 1 ? (tradeCount - 1) * 10 : 0; // Penalize multiple trades
+    const holdTimeBonus = heldSignificantValue && holdTimeDays > 0 ? holdTimeDays * 5 : 0;
+    const rankingScore = volumeScore - tradeCountPenalty + holdTimeBonus;
+
+    tokenAnalysis.push({
+      symbol,
+      totalBought,
+      totalSold,
+      holdingBalance,
+      currentPrice,
+      tradeCount,
+      totalSpentUsd,
+      totalReceivedUsd,
+      currentHoldingValueUsd,
       realizedPnL,
       unrealizedPnL,
       totalPnL,
       pnlPercent,
-      currentPrice: data.currentPrice,
-    };
-
-    // Track for best/worst calculation (exclude stables and SOL for meme analysis)
-    if (symbol !== 'SOL' && symbol !== 'USDC' && symbol !== 'USDT' && data.txCount > 0) {
-      tokenPnL.push({ symbol, ...tokenVolumes[symbol] });
-    }
+      holdTimeDays,
+      heldSignificantValue,
+      rankingScore,
+      volumeUsd: totalSpentUsd + totalReceivedUsd,
+    });
   });
 
-  // Sort by P&L for best/worst trades
-  const sortedByPnL = tokenPnL.sort((a, b) => b.totalPnL - a.totalPnL);
-  const sortedByPnLPercent = tokenPnL.sort((a, b) => b.pnlPercent - a.pnlPercent);
+  console.log('Token Analysis:', tokenAnalysis);
 
-  console.log('Token P&L:', tokenPnL);
+  // Sort tokens by ranking score (highest first)
+  const rankedTokens = [...tokenAnalysis]
+    .filter(t => t.volumeUsd > 0)
+    .sort((a, b) => b.rankingScore - a.rankingScore);
 
-  // Sort by volume for top tokens
-  const topTokensByVolume = Object.entries(tokenVolumes)
-    .filter(([symbol]) => symbol !== 'SOL' && symbol !== 'USDC' && symbol !== 'USDT')
-    .sort((a, b) => b[1].volumeUsd - a[1].volumeUsd || b[1].txCount - a[1].txCount)
-    .slice(0, 5);
+  // Find best trade (highest USD gain)
+  const sortedByPnLUsd = [...tokenAnalysis]
+    .filter(t => t.totalPnL !== 0)
+    .sort((a, b) => b.totalPnL - a.totalPnL);
+
+  // Find worst trade (biggest USD loss)
+  const sortedByLoss = [...tokenAnalysis]
+    .filter(t => t.totalPnL < 0)
+    .sort((a, b) => a.totalPnL - b.totalPnL); // Most negative first
+
+  // Find best % gain
+  const sortedByPnLPercent = [...tokenAnalysis]
+    .filter(t => t.pnlPercent > 0 && t.totalSpentUsd >= 1) // Only count if spent at least $1
+    .sort((a, b) => b.pnlPercent - a.pnlPercent);
+
+  // Top 5 tokens by ranking
+  const topTokens = rankedTokens.slice(0, 5);
 
   // Find peak trading hour
   const hourCounts = Array(24).fill(0);
@@ -550,70 +610,83 @@ function calculateFinalStats(stats) {
     (peakHour >= 22 || peakHour <= 5 ? 15 : 0)
   ));
 
-  // Find most traded token (by transaction count, excluding stables)
-  const mostTraded = topTokensByVolume[0] || [sortedTokens[0]?.[0] || 'SOL', { txCount: 0 }];
+  // Find most traded token (by trade count, excluding stables)
+  const mostTradedToken = rankedTokens[0] || { symbol: 'SOL', tradeCount: 0, volumeUsd: 0 };
 
-  // Find best trade (highest % gain) and worst trade (lowest % / biggest loss)
-  const bestTrade = sortedByPnLPercent.find(t => t.pnlPercent > 0) || sortedByPnLPercent[0];
-  const worstTrade = [...sortedByPnLPercent].reverse().find(t => t.pnlPercent < 0) || sortedByPnLPercent[sortedByPnLPercent.length - 1];
+  // Find best trade (highest % gain with at least $1 spent)
+  const bestTrade = sortedByPnLPercent[0] || null;
 
-  // Find tokens still being held vs sold
-  const heldTokens = tokenPnL.filter(t => t.netPosition > 0);
-  const soldTokens = tokenPnL.filter(t => t.netPosition <= 0);
+  // Find worst trade (biggest USD loss)
+  const worstTrade = sortedByLoss[0] || null;
+
+  // Find tokens with longest and shortest hold times
+  const tokensWithHoldTime = tokenAnalysis.filter(t => t.holdTimeDays > 0 && t.heldSignificantValue);
+  const longestHoldToken = tokensWithHoldTime.sort((a, b) => b.holdTimeDays - a.holdTimeDays)[0];
+  const shortestHoldToken = tokensWithHoldTime.sort((a, b) => a.holdTimeDays - b.holdTimeDays)[0];
 
   console.log('Final stats calculation:', {
-    tokenVolumes,
-    topTokensByVolume,
+    rankedTokens,
+    topTokens,
     bestTrade,
     worstTrade,
-    totalPnL: tokenPnL.reduce((sum, t) => sum + t.totalPnL, 0)
+    totalPnL: tokenAnalysis.reduce((sum, t) => sum + t.totalPnL, 0)
   });
 
   // Calculate total P&L across all tokens
-  const totalRealizedPnL = tokenPnL.reduce((sum, t) => sum + t.realizedPnL, 0);
-  const totalUnrealizedPnL = tokenPnL.reduce((sum, t) => sum + t.unrealizedPnL, 0);
+  const totalRealizedPnL = tokenAnalysis.reduce((sum, t) => sum + t.realizedPnL, 0);
+  const totalUnrealizedPnL = tokenAnalysis.reduce((sum, t) => sum + t.unrealizedPnL, 0);
 
   return {
     ...stats,
     totalVolume: Math.round(stats.totalVolume),
     gasSpent: Math.round(stats.gasSpent * 100) / 100,
     mostTradedToken: {
-      symbol: mostTraded[0],
-      count: mostTraded[1]?.txCount || sortedTokens[0]?.[1] || 0,
-      logo: tokenLogos[mostTraded[0]] || '🪙',
+      symbol: mostTradedToken.symbol,
+      count: mostTradedToken.tradeCount,
+      logo: tokenLogos[mostTradedToken.symbol] || '🪙',
     },
-    topTokens: (topTokensByVolume.length > 0 ? topTokensByVolume : sortedTokens.slice(0, 5)).map(([symbol, data]) => ({
-      symbol,
-      volume: data?.volumeUsd ? Math.round(data.volumeUsd) : (data?.txCount || data || 0),
-      pnl: data?.totalPnL ? Math.round(data.totalPnL) : 0,
-      logo: tokenLogos[symbol] || '🪙',
+    topTokens: topTokens.map(t => ({
+      symbol: t.symbol,
+      volume: Math.round(t.volumeUsd),
+      pnl: Math.round(t.totalPnL),
+      pnlPercent: Math.round(t.pnlPercent),
+      tradeCount: t.tradeCount,
+      holdTimeDays: t.holdTimeDays,
+      logo: tokenLogos[t.symbol] || '🪙',
     })),
     bestTrade: bestTrade ? {
       token: bestTrade.symbol,
       gain: Math.round(bestTrade.pnlPercent),
       pnlUsd: Math.round(bestTrade.totalPnL),
-      buyPrice: bestTrade.volumeUsd > 0 ? (bestTrade.volumeUsd / bestTrade.totalMoved).toFixed(6) : 0,
-      sellPrice: bestTrade.currentPrice?.toFixed(6) || 0
-    } : { token: 'N/A', gain: 0, pnlUsd: 0, buyPrice: 0, sellPrice: 0 },
+      totalSpentUsd: Math.round(bestTrade.totalSpentUsd),
+      totalReceivedUsd: Math.round(bestTrade.totalReceivedUsd),
+    } : { token: 'N/A', gain: 0, pnlUsd: 0, totalSpentUsd: 0, totalReceivedUsd: 0 },
     worstTrade: worstTrade ? {
       token: worstTrade.symbol,
       loss: Math.round(worstTrade.pnlPercent),
       pnlUsd: Math.round(worstTrade.totalPnL),
-      buyPrice: worstTrade.volumeUsd > 0 ? (worstTrade.volumeUsd / worstTrade.totalMoved).toFixed(6) : 0,
-      sellPrice: worstTrade.currentPrice?.toFixed(6) || 0
-    } : { token: 'N/A', loss: 0, pnlUsd: 0, buyPrice: 0, sellPrice: 0 },
+      totalSpentUsd: Math.round(worstTrade.totalSpentUsd),
+      totalReceivedUsd: Math.round(worstTrade.totalReceivedUsd),
+    } : { token: 'N/A', loss: 0, pnlUsd: 0, totalSpentUsd: 0, totalReceivedUsd: 0 },
     peakHour: `${peakHour === 0 ? 12 : peakHour > 12 ? peakHour - 12 : peakHour}:00 ${peakHour >= 12 ? 'PM' : 'AM'}`,
     peakDay: days[peakDayIndex],
     tradingPersonality: personality,
     personalityDescription: personalityDesc,
-    longestHold: { token: heldTokens[0]?.symbol || 'SOL', days: Math.floor(Math.random() * 200) + 30 },
-    shortestHold: { token: soldTokens[0]?.symbol || topTokensByVolume[0]?.[0] || 'PUMP', minutes: Math.floor(Math.random() * 30) + 1 },
+    longestHold: longestHoldToken ? {
+      token: longestHoldToken.symbol,
+      days: longestHoldToken.holdTimeDays,
+    } : { token: 'N/A', days: 0 },
+    shortestHold: shortestHoldToken ? {
+      token: shortestHoldToken.symbol,
+      days: shortestHoldToken.holdTimeDays,
+    } : { token: 'N/A', days: 0 },
     uniqueTokens,
     degenScore,
     swapCount,
     totalRealizedPnL: Math.round(totalRealizedPnL),
     totalUnrealizedPnL: Math.round(totalUnrealizedPnL),
     totalPnL: Math.round(totalRealizedPnL + totalUnrealizedPnL),
+    tokenAnalysis, // Include full analysis for debugging
   };
 }
 
