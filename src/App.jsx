@@ -345,12 +345,76 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
       if (tx.type === 'SWAP' && tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         stats.swapCount = (stats.swapCount || 0) + 1;
 
-        // In a swap, we typically sell one token and buy another
-        // Track each token involved
+        // In a swap, identify what we sent (sold) and what we received (bought)
+        // The USD value comes from looking at the SOL/USDC side of the trade
+        let sentTransfers = [];
+        let receivedTransfers = [];
+
         tx.tokenTransfers.forEach(transfer => {
+          const amount = transfer.tokenAmount || 0;
+          if (amount <= 0) return;
+
+          if (transfer.fromUserAccount === walletAddress) {
+            sentTransfers.push(transfer);
+          }
+          if (transfer.toUserAccount === walletAddress) {
+            receivedTransfers.push(transfer);
+          }
+        });
+
+        // Also check native SOL transfers
+        if (tx.nativeTransfers) {
+          tx.nativeTransfers.forEach(transfer => {
+            const solAmount = Math.abs(transfer.amount) / 1e9;
+            if (solAmount < 0.001) return; // Skip tiny amounts (fees)
+
+            if (transfer.fromUserAccount === walletAddress) {
+              sentTransfers.push({
+                mint: 'So11111111111111111111111111111111111111112',
+                tokenAmount: solAmount,
+                fromUserAccount: walletAddress,
+              });
+            }
+            if (transfer.toUserAccount === walletAddress) {
+              receivedTransfers.push({
+                mint: 'So11111111111111111111111111111111111111112',
+                tokenAmount: solAmount,
+                toUserAccount: walletAddress,
+              });
+            }
+          });
+        }
+
+        // Calculate USD value of the swap from the SOL/USDC side
+        let swapUsdValue = 0;
+        const stableMints = [
+          'So11111111111111111111111111111111111111112', // SOL
+          'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+          'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+        ];
+
+        // Try to get USD value from what we sent or received that's SOL/USDC
+        for (const transfer of [...sentTransfers, ...receivedTransfers]) {
+          const symbol = getSymbol(transfer.mint);
+          const price = getPrice(transfer.mint);
+          if (stableMints.includes(transfer.mint) || symbol === 'USDC' || symbol === 'USDT') {
+            const amount = transfer.tokenAmount || 0;
+            if (symbol === 'USDC' || symbol === 'USDT') {
+              swapUsdValue = Math.max(swapUsdValue, amount);
+            } else {
+              swapUsdValue = Math.max(swapUsdValue, amount * price);
+            }
+          }
+        }
+
+        // Process each non-stable token involved in the swap
+        [...sentTransfers, ...receivedTransfers].forEach(transfer => {
           const symbol = getSymbol(transfer.mint);
           const amount = transfer.tokenAmount || 0;
           const price = getPrice(transfer.mint);
+
+          // Skip stables - we only care about the meme coins
+          if (symbol === 'USDC' || symbol === 'USDT' || symbol === 'SOL') return;
 
           if (!tokenTrades[symbol]) {
             tokenTrades[symbol] = {
@@ -359,8 +423,8 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
               currentPrice: price,
               totalBought: 0,
               totalSold: 0,
-              totalSpentUsd: 0,  // USD spent to buy
-              totalReceivedUsd: 0, // USD received from selling
+              totalSpentUsd: 0,
+              totalReceivedUsd: 0,
               firstBuyTime: null,
               lastSellTime: null,
               holdingBalance: 0,
@@ -369,22 +433,19 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
 
           tokenTrades[symbol].currentPrice = price;
 
-          // Received tokens = BUY
-          if (transfer.toUserAccount === walletAddress && amount > 0) {
-            // For buys, we need to estimate what we paid
-            // In a swap, we usually pay SOL or stablecoin
-            // Estimate cost based on current price (not ideal but best we can do)
-            const estimatedCost = amount * price;
+          // Received tokens = BUY (we spent SOL/USDC to get this)
+          if (transfer.toUserAccount === walletAddress) {
+            // Use swap USD value if available, otherwise estimate from current price
+            const costUsd = swapUsdValue > 0 ? swapUsdValue : amount * price;
 
             tokenTrades[symbol].trades.push({
               type: 'buy',
               amount,
-              pricePerToken: price,
-              usdValue: estimatedCost,
+              usdValue: costUsd,
               timestamp: txTimestamp
             });
             tokenTrades[symbol].totalBought += amount;
-            tokenTrades[symbol].totalSpentUsd += estimatedCost;
+            tokenTrades[symbol].totalSpentUsd += costUsd;
             tokenTrades[symbol].holdingBalance += amount;
 
             if (!tokenTrades[symbol].firstBuyTime) {
@@ -392,19 +453,19 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
             }
           }
 
-          // Sent tokens = SELL
-          if (transfer.fromUserAccount === walletAddress && amount > 0) {
-            const saleValue = amount * price;
+          // Sent tokens = SELL (we received SOL/USDC for this)
+          if (transfer.fromUserAccount === walletAddress) {
+            // Use swap USD value if available, otherwise estimate from current price
+            const saleUsd = swapUsdValue > 0 ? swapUsdValue : amount * price;
 
             tokenTrades[symbol].trades.push({
               type: 'sell',
               amount,
-              pricePerToken: price,
-              usdValue: saleValue,
+              usdValue: saleUsd,
               timestamp: txTimestamp
             });
             tokenTrades[symbol].totalSold += amount;
-            tokenTrades[symbol].totalReceivedUsd += saleValue;
+            tokenTrades[symbol].totalReceivedUsd += saleUsd;
             tokenTrades[symbol].holdingBalance -= amount;
             tokenTrades[symbol].lastSellTime = txTimestamp;
           }
@@ -619,10 +680,21 @@ function calculateFinalStats(stats) {
   // Find worst trade (biggest USD loss)
   const worstTrade = sortedByLoss[0] || null;
 
-  // Find tokens with longest and shortest hold times
-  const tokensWithHoldTime = tokenAnalysis.filter(t => t.holdTimeDays > 0 && t.heldSignificantValue);
-  const longestHoldToken = tokensWithHoldTime.sort((a, b) => b.holdTimeDays - a.holdTimeDays)[0];
-  const shortestHoldToken = tokensWithHoldTime.sort((a, b) => a.holdTimeDays - b.holdTimeDays)[0];
+  // If no worst trade found from losses, find the one with lowest P&L %
+  const fallbackWorstTrade = worstTrade || [...tokenAnalysis]
+    .filter(t => t.totalSpentUsd >= 1)
+    .sort((a, b) => a.pnlPercent - b.pnlPercent)[0] || null;
+
+  // Find tokens with longest and shortest hold times (excluding SOL and ETH)
+  const tokensWithHoldTime = tokenAnalysis.filter(t => 
+    t.holdTimeDays > 0 && 
+    t.heldSignificantValue && 
+    t.symbol !== 'SOL' && 
+    t.symbol !== 'ETH'
+  );
+  const sortedByHoldTime = [...tokensWithHoldTime].sort((a, b) => b.holdTimeDays - a.holdTimeDays);
+  const longestHoldToken = sortedByHoldTime[0];
+  const shortestHoldToken = sortedByHoldTime[sortedByHoldTime.length - 1];
 
   console.log('Final stats calculation:', {
     rankedTokens,
@@ -661,12 +733,12 @@ function calculateFinalStats(stats) {
       totalSpentUsd: Math.round(bestTrade.totalSpentUsd),
       totalReceivedUsd: Math.round(bestTrade.totalReceivedUsd),
     } : { token: 'N/A', gain: 0, pnlUsd: 0, totalSpentUsd: 0, totalReceivedUsd: 0 },
-    worstTrade: worstTrade ? {
-      token: worstTrade.symbol,
-      loss: Math.round(worstTrade.pnlPercent),
-      pnlUsd: Math.round(worstTrade.totalPnL),
-      totalSpentUsd: Math.round(worstTrade.totalSpentUsd),
-      totalReceivedUsd: Math.round(worstTrade.totalReceivedUsd),
+    worstTrade: fallbackWorstTrade ? {
+      token: fallbackWorstTrade.symbol,
+      loss: Math.round(fallbackWorstTrade.pnlPercent),
+      pnlUsd: Math.round(fallbackWorstTrade.totalPnL),
+      totalSpentUsd: Math.round(fallbackWorstTrade.totalSpentUsd),
+      totalReceivedUsd: Math.round(fallbackWorstTrade.totalReceivedUsd),
     } : { token: 'N/A', loss: 0, pnlUsd: 0, totalSpentUsd: 0, totalReceivedUsd: 0 },
     peakHour: `${peakHour === 0 ? 12 : peakHour > 12 ? peakHour - 12 : peakHour}:00 ${peakHour >= 12 ? 'PM' : 'AM'}`,
     peakDay: days[peakDayIndex],
