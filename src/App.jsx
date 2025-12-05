@@ -245,7 +245,7 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
     tokenCounts: {},
     trades: [],
     timestamps: [],
-    monthlyActivity: Array(11).fill(0).map((_, i) => ({
+    monthlyActivity: Array(12).fill(0).map((_, i) => ({
       month: new Date(2025, i, 1).toLocaleDateString('en-US', { month: 'short' }),
       txs: 0,
     })),
@@ -268,7 +268,7 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
       const date = new Date(parseInt(tx.timeStamp) * 1000);
       stats.timestamps.push(date);
       const monthIndex = date.getMonth();
-      if (monthIndex < 11) stats.monthlyActivity[monthIndex].txs++;
+      if (monthIndex < 12) stats.monthlyActivity[monthIndex].txs++;
       
       stats.tokenCounts['ETH'] = (stats.tokenCounts['ETH'] || 0) + 1;
     });
@@ -279,7 +279,7 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
       
       const date = new Date(parseInt(tx.timeStamp) * 1000);
       const monthIndex = date.getMonth();
-      if (monthIndex < 11) stats.monthlyActivity[monthIndex].txs++;
+      if (monthIndex < 12) stats.monthlyActivity[monthIndex].txs++;
     });
   }
 
@@ -338,7 +338,7 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         const date = new Date(tx.timestamp * 1000);
         stats.timestamps.push(date);
         const monthIndex = date.getMonth();
-        if (monthIndex < 11) stats.monthlyActivity[monthIndex].txs++;
+        if (monthIndex < 12) stats.monthlyActivity[monthIndex].txs++;
       }
 
       // Process SWAP transactions - these are the key trades for P&L

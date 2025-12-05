@@ -220,23 +220,38 @@ const createSlides = (data) => [
     bg: 'from-sky-900 via-blue-800 to-indigo-900',
     render: () => {
       const maxTxs = Math.max(...data.monthlyActivity.map(m => m.txs), 1);
+      const totalTxs = data.monthlyActivity.reduce((sum, m) => sum + m.txs, 0);
       const peakMonth = data.monthlyActivity.reduce((a, b) => a.txs > b.txs ? a : b);
       return (
         <div className="flex flex-col items-center justify-center h-full text-center px-8">
           <p className="text-blue-200 text-xl mb-6">Your Year in Transactions</p>
-          <div className="flex items-end gap-1 h-40 w-full max-w-xs">
-            {data.monthlyActivity.map((month) => (
-              <div key={month.month} className="flex-1 flex flex-col items-center">
-                <div
-                  className="w-full bg-gradient-to-t from-blue-500 to-cyan-400 rounded-t-sm min-h-[4px]"
-                  style={{ height: `${(month.txs / maxTxs) * 100}%` }}
-                />
-                <span className="text-xs text-blue-300 mt-2">{month.month.slice(0, 1)}</span>
-              </div>
-            ))}
+          <div className="flex items-end gap-1 h-48 w-full max-w-sm">
+            {data.monthlyActivity.map((month) => {
+              const heightPercent = maxTxs > 0 ? (month.txs / maxTxs) * 100 : 0;
+              const isPeak = month.txs === peakMonth.txs && month.txs > 0;
+              return (
+                <div key={month.month} className="flex-1 flex flex-col items-center">
+                  <span className={`text-xs mb-1 ${month.txs > 0 ? 'text-cyan-300' : 'text-blue-400/50'}`}>
+                    {month.txs > 0 ? month.txs : ''}
+                  </span>
+                  <div
+                    className={`w-full rounded-t-sm min-h-[4px] transition-all ${
+                      isPeak 
+                        ? 'bg-gradient-to-t from-yellow-500 to-yellow-300' 
+                        : month.txs > 0 
+                          ? 'bg-gradient-to-t from-blue-500 to-cyan-400'
+                          : 'bg-blue-900/50'
+                    }`}
+                    style={{ height: `${Math.max(heightPercent, 2)}%` }}
+                  />
+                  <span className="text-xs text-blue-300 mt-2">{month.month.slice(0, 1)}</span>
+                </div>
+              );
+            })}
           </div>
           <p className="text-blue-200 text-sm mt-6">
-            Peak month: <span className="font-bold text-white">{peakMonth.month}</span> with {peakMonth.txs} txs
+            Peak: <span className="font-bold text-yellow-300">{peakMonth.month}</span> with {peakMonth.txs} txs
+            {totalTxs > 0 && <span className="text-blue-300"> • {totalTxs} total</span>}
           </p>
         </div>
       );
