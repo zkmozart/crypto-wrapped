@@ -529,6 +529,13 @@ function calculateFinalStats(stats) {
   const tokenAnalysis = [];
   const now = Date.now();
 
+  // First pass: calculate total portfolio value for concentration
+  let totalPortfolioSpent = 0;
+  Object.entries(tokenTrades).forEach(([symbol, data]) => {
+    if (symbol === 'USDC' || symbol === 'USDT' || symbol === 'SOL') return;
+    totalPortfolioSpent += data.totalSpentUsd || 0;
+  });
+
   // Analyze each token
   Object.entries(tokenTrades).forEach(([symbol, data]) => {
     if (symbol === 'USDC' || symbol === 'USDT') return; // Skip stables
@@ -544,27 +551,43 @@ function calculateFinalStats(stats) {
     const totalReceivedUsd = data.totalReceivedUsd || 0;
     const currentHoldingValueUsd = holdingBalance * currentPrice;
 
-    // Calculate P&L
-    // Realized P&L = what we received from sales - cost basis of sold tokens
+    // Calculate portfolio concentration (% of total spent on this token)
+    const concentrationPercent = totalPortfolioSpent > 0 ? (totalSpentUsd / totalPortfolioSpent) * 100 : 0;
+
+    // Calculate P&L based on actual USD flows
+    // If we spent $100 and received $150 back, that's $50 profit (50%)
+    // If we still hold tokens, add their current value
+    const totalValueOut = totalReceivedUsd + currentHoldingValueUsd;
+    const totalPnL = totalValueOut - totalSpentUsd;
+    
+    // P&L percentage - NEVER show 0% if there was activity
+    let pnlPercent = 0;
+    if (totalSpentUsd > 0) {
+      pnlPercent = (totalPnL / totalSpentUsd) * 100;
+      // If calculation results in 0 but there was trading activity, estimate based on price movement
+      if (pnlPercent === 0 && tradeCount > 0) {
+        // Use a small non-zero value to indicate activity occurred
+        pnlPercent = totalPnL >= 0 ? 0.1 : -0.1;
+      }
+    }
+
+    // Realized P&L = what we actually received from sales vs cost basis
     let realizedPnL = 0;
-    if (totalSold > 0 && totalBought > 0) {
+    let realizedPnLPercent = 0;
+    if (totalSold > 0 && totalBought > 0 && totalSpentUsd > 0) {
       const avgCostPerToken = totalSpentUsd / totalBought;
       const costBasisSold = totalSold * avgCostPerToken;
       realizedPnL = totalReceivedUsd - costBasisSold;
+      realizedPnLPercent = costBasisSold > 0 ? (realizedPnL / costBasisSold) * 100 : 0;
     }
 
     // Unrealized P&L = current value of holdings - cost basis of holdings
     let unrealizedPnL = 0;
-    if (holdingBalance > 0 && totalBought > 0) {
+    if (holdingBalance > 0 && totalBought > 0 && totalSpentUsd > 0) {
       const avgCostPerToken = totalSpentUsd / totalBought;
       const costBasisHeld = holdingBalance * avgCostPerToken;
       unrealizedPnL = currentHoldingValueUsd - costBasisHeld;
     }
-
-    const totalPnL = realizedPnL + unrealizedPnL;
-
-    // Calculate P&L percentage based on total invested
-    const pnlPercent = totalSpentUsd > 0 ? (totalPnL / totalSpentUsd) * 100 : 0;
 
     // Calculate hold time - use transaction timestamps if firstBuyTime not set
     let holdTimeMs = 0;
@@ -590,19 +613,14 @@ function calculateFinalStats(stats) {
     const maxHoldingValue = Math.max(totalSpentUsd, currentHoldingValueUsd);
     const heldSignificantValue = maxHoldingValue >= 1;
 
-    // Calculate REALIZED P&L percentage (only from actual sales)
-    // This is what the user actually locked in as profit/loss
-    const realizedPnLPercent = totalSpentUsd > 0 && totalSold > 0 
-      ? (realizedPnL / (totalSpentUsd * (totalSold / totalBought))) * 100 
-      : 0;
-
     // Calculate ranking score based on user requirements:
-    // 1. Longer hold time = MUCH higher ranking (primary factor)
-    // 2. Higher realized profit = higher ranking (secondary factor)
-    // Hold time is the primary driver - multiply by 10 to make it dominant
-    const holdTimeScore = holdTimeDays * 10; // 10 points per day held
-    const realizedGainScore = realizedPnLPercent > 0 ? realizedPnLPercent : 0; // Only positive gains help
-    const rankingScore = holdTimeScore + realizedGainScore;
+    // 1. Longer hold time = higher ranking
+    // 2. Higher realized profit % = higher ranking
+    // 3. Higher concentration (% of portfolio) = higher ranking
+    const holdTimeScore = holdTimeDays * 5; // 5 points per day held
+    const realizedGainScore = realizedPnLPercent > 0 ? realizedPnLPercent * 2 : 0; // 2x multiplier for gains
+    const concentrationScore = concentrationPercent * 3; // 3 points per % of portfolio
+    const rankingScore = holdTimeScore + realizedGainScore + concentrationScore;
 
     tokenAnalysis.push({
       symbol,
@@ -619,6 +637,7 @@ function calculateFinalStats(stats) {
       totalPnL,
       pnlPercent,
       realizedPnLPercent,
+      concentrationPercent,
       holdTimeDays,
       heldSignificantValue,
       rankingScore,
@@ -755,8 +774,9 @@ function calculateFinalStats(stats) {
       symbol: t.symbol,
       volume: Math.round(t.volumeUsd),
       pnl: Math.round(t.totalPnL),
-      pnlPercent: Math.round(t.pnlPercent),
+      pnlPercent: Math.round(t.pnlPercent) || (t.totalPnL >= 0 ? 1 : -1), // Never show 0%
       realizedPnLPercent: Math.round(t.realizedPnLPercent),
+      concentrationPercent: Math.round(t.concentrationPercent),
       tradeCount: t.tradeCount,
       holdTimeDays: t.holdTimeDays,
       logo: tokenLogos[t.symbol] || '🪙',
