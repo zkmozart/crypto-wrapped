@@ -472,19 +472,87 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         });
       }
 
-      // Process all token transfers for volume tracking
+      // Process all token transfers for volume tracking AND token holding
       if (tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         tx.tokenTransfers.forEach(transfer => {
           const symbol = getSymbol(transfer.mint);
           const price = getPrice(transfer.mint);
+          const amount = transfer.tokenAmount || 0;
+          
           stats.tokenCounts[symbol] = (stats.tokenCounts[symbol] || 0) + 1;
 
-          if (transfer.tokenAmount) {
-            const usdValue = transfer.tokenAmount * price;
+          if (amount > 0) {
+            const usdValue = amount * price;
             if (symbol === 'USDC' || symbol === 'USDT') {
-              stats.totalVolume += transfer.tokenAmount;
+              stats.totalVolume += amount;
             } else if (price > 0) {
               stats.totalVolume += usdValue;
+            }
+
+            // Track token holdings for ALL transfers (not just SWAPs)
+            // This ensures we capture tokens from any source
+            if (symbol !== 'USDC' && symbol !== 'USDT' && symbol !== 'SOL') {
+              if (!tokenTrades[symbol]) {
+                tokenTrades[symbol] = {
+                  trades: [],
+                  mint: transfer.mint,
+                  currentPrice: price,
+                  totalBought: 0,
+                  totalSold: 0,
+                  totalSpentUsd: 0,
+                  totalReceivedUsd: 0,
+                  firstBuyTime: null,
+                  lastSellTime: null,
+                  holdingBalance: 0,
+                };
+              }
+
+              tokenTrades[symbol].currentPrice = price;
+
+              // Received tokens = acquired (BUY or airdrop or transfer in)
+              if (transfer.toUserAccount === walletAddress) {
+                // Only add if not already tracked from SWAP processing
+                const existingTrade = tokenTrades[symbol].trades.find(
+                  t => t.timestamp === txTimestamp && t.type === 'buy' && t.amount === amount
+                );
+                
+                if (!existingTrade) {
+                  tokenTrades[symbol].trades.push({
+                    type: 'buy',
+                    amount,
+                    usdValue: usdValue,
+                    timestamp: txTimestamp
+                  });
+                  tokenTrades[symbol].totalBought += amount;
+                  tokenTrades[symbol].totalSpentUsd += usdValue;
+                  tokenTrades[symbol].holdingBalance += amount;
+
+                  if (!tokenTrades[symbol].firstBuyTime) {
+                    tokenTrades[symbol].firstBuyTime = txTimestamp;
+                  }
+                }
+              }
+
+              // Sent tokens = disposed (SELL or transfer out)
+              if (transfer.fromUserAccount === walletAddress) {
+                // Only add if not already tracked from SWAP processing
+                const existingTrade = tokenTrades[symbol].trades.find(
+                  t => t.timestamp === txTimestamp && t.type === 'sell' && t.amount === amount
+                );
+                
+                if (!existingTrade) {
+                  tokenTrades[symbol].trades.push({
+                    type: 'sell',
+                    amount,
+                    usdValue: usdValue,
+                    timestamp: txTimestamp
+                  });
+                  tokenTrades[symbol].totalSold += amount;
+                  tokenTrades[symbol].totalReceivedUsd += usdValue;
+                  tokenTrades[symbol].holdingBalance -= amount;
+                  tokenTrades[symbol].lastSellTime = txTimestamp;
+                }
+              }
             }
           }
         });
