@@ -566,27 +566,43 @@ function calculateFinalStats(stats) {
     // Calculate P&L percentage based on total invested
     const pnlPercent = totalSpentUsd > 0 ? (totalPnL / totalSpentUsd) * 100 : 0;
 
-    // Calculate hold time
+    // Calculate hold time - use transaction timestamps if firstBuyTime not set
     let holdTimeMs = 0;
     let holdTimeDays = 0;
-    if (data.firstBuyTime) {
-      const endTime = data.lastSellTime && holdingBalance <= 0 ? data.lastSellTime : now;
-      holdTimeMs = endTime - data.firstBuyTime;
-      holdTimeDays = Math.floor(holdTimeMs / (1000 * 60 * 60 * 24));
+    
+    // Get first and last trade timestamps
+    const tradeTimestamps = data.trades?.map(t => t.timestamp).filter(t => t) || [];
+    const firstTradeTime = tradeTimestamps.length > 0 ? Math.min(...tradeTimestamps) : null;
+    const lastTradeTime = tradeTimestamps.length > 0 ? Math.max(...tradeTimestamps) : null;
+    
+    // Use firstBuyTime if available, otherwise use first trade time
+    const startTime = data.firstBuyTime || firstTradeTime;
+    
+    if (startTime) {
+      // If still holding, hold time is from first buy to now
+      // If sold everything, hold time is from first buy to last sell
+      const endTime = holdingBalance > 0 ? now : (data.lastSellTime || lastTradeTime || now);
+      holdTimeMs = endTime - startTime;
+      holdTimeDays = Math.max(0, Math.floor(holdTimeMs / (1000 * 60 * 60 * 24)));
     }
 
     // Check if ever held more than $1
     const maxHoldingValue = Math.max(totalSpentUsd, currentHoldingValueUsd);
     const heldSignificantValue = maxHoldingValue >= 1;
 
-    // Calculate ranking score
-    // Higher USD volume = better (positive)
-    // More trades = worse (negative impact)
-    // Longer hold time with significant value = better (positive)
-    const volumeScore = totalSpentUsd + totalReceivedUsd;
-    const tradeCountPenalty = tradeCount > 1 ? (tradeCount - 1) * 10 : 0; // Penalize multiple trades
-    const holdTimeBonus = heldSignificantValue && holdTimeDays > 0 ? holdTimeDays * 5 : 0;
-    const rankingScore = volumeScore - tradeCountPenalty + holdTimeBonus;
+    // Calculate REALIZED P&L percentage (only from actual sales)
+    // This is what the user actually locked in as profit/loss
+    const realizedPnLPercent = totalSpentUsd > 0 && totalSold > 0 
+      ? (realizedPnL / (totalSpentUsd * (totalSold / totalBought))) * 100 
+      : 0;
+
+    // Calculate ranking score based on user requirements:
+    // 1. Higher realized % gain = higher ranking
+    // 2. Longer hold time = higher ranking
+    // Normalize both to similar scales and combine
+    const realizedGainScore = realizedPnLPercent; // Can be negative or positive
+    const holdTimeScore = holdTimeDays * 0.5; // 0.5 points per day held
+    const rankingScore = realizedGainScore + holdTimeScore;
 
     tokenAnalysis.push({
       symbol,
@@ -602,6 +618,7 @@ function calculateFinalStats(stats) {
       unrealizedPnL,
       totalPnL,
       pnlPercent,
+      realizedPnLPercent,
       holdTimeDays,
       heldSignificantValue,
       rankingScore,
@@ -722,6 +739,7 @@ function calculateFinalStats(stats) {
       volume: Math.round(t.volumeUsd),
       pnl: Math.round(t.totalPnL),
       pnlPercent: Math.round(t.pnlPercent),
+      realizedPnLPercent: Math.round(t.realizedPnLPercent),
       tradeCount: t.tradeCount,
       holdTimeDays: t.holdTimeDays,
       logo: tokenLogos[t.symbol] || '🪙',

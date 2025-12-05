@@ -200,16 +200,13 @@ const createSlides = (data) => [
               style={{ opacity: 1 - i * 0.12 }}
             >
               <span className="text-2xl w-10">{token.logo}</span>
-              <div className="flex-1 text-left">
-                <span className="text-xl font-bold text-white">{token.symbol}</span>
-                <div className="text-xs text-orange-300">
-                  {token.tradeCount} trade{token.tradeCount !== 1 ? 's' : ''} • {token.holdTimeDays}d hold
-                </div>
-              </div>
+              <span className="text-xl font-bold text-white flex-1 text-left">{token.symbol}</span>
               <div className="text-right">
-                <div className="text-orange-200">${token.volume.toLocaleString()}</div>
-                <div className={`text-sm font-bold ${token.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {token.pnl >= 0 ? '+' : ''}{token.pnlPercent}% (${token.pnl >= 0 ? '+' : ''}{token.pnl.toLocaleString()})
+                <div className={`text-lg font-bold ${token.pnlPercent >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {token.pnlPercent >= 0 ? '+' : ''}{token.pnlPercent}%
+                </div>
+                <div className="text-sm text-orange-300">
+                  {token.holdTimeDays}d held
                 </div>
               </div>
             </div>
