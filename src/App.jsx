@@ -120,25 +120,54 @@ async function fetchSolanaData(address, startDate) {
   }
 
   try {
-    // Fetch parsed transaction history
-    const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${apiKey}&limit=100`;
-    console.log('Fetching Helius URL:', url.replace(apiKey, 'HIDDEN'));
+    // Fetch ALL parsed transaction history with pagination
+    let allTransactions = [];
+    let beforeSignature = null;
+    let hasMore = true;
+    const startTimestamp = new Date(startDate).getTime() / 1000;
 
-    const response = await fetch(url);
-    const transactions = await response.json();
+    console.log('Fetching all transactions from Helius...');
 
-    // Check if API returned valid array or error
-    if (transactions.error) {
-      console.error('Helius API error:', transactions.error);
-      return getMockSolData();
+    while (hasMore && allTransactions.length < 1000) { // Cap at 1000 to avoid too many requests
+      const url = beforeSignature 
+        ? `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${apiKey}&limit=100&before=${beforeSignature}`
+        : `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${apiKey}&limit=100`;
+      
+      const response = await fetch(url);
+      const transactions = await response.json();
+
+      if (transactions.error) {
+        console.error('Helius API error:', transactions.error);
+        break;
+      }
+
+      const txArray = Array.isArray(transactions) ? transactions : [];
+      
+      if (txArray.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      // Check if we've gone past our start date
+      const oldestTx = txArray[txArray.length - 1];
+      if (oldestTx.timestamp && oldestTx.timestamp < startTimestamp) {
+        // Filter and add only transactions within date range
+        const validTxs = txArray.filter(tx => tx.timestamp >= startTimestamp);
+        allTransactions = [...allTransactions, ...validTxs];
+        hasMore = false;
+      } else {
+        allTransactions = [...allTransactions, ...txArray];
+        beforeSignature = oldestTx.signature;
+      }
+
+      console.log(`Fetched ${allTransactions.length} transactions so far...`);
     }
 
-    const txArray = Array.isArray(transactions) ? transactions : [];
-    console.log('Total Helius transactions:', txArray.length);
+    console.log('Total Helius transactions fetched:', allTransactions.length);
 
     // Collect unique mint addresses
     const mints = new Set();
-    txArray.forEach(tx => {
+    allTransactions.forEach(tx => {
       if (tx.tokenTransfers) {
         tx.tokenTransfers.forEach(t => {
           if (t.mint) mints.add(t.mint);
@@ -149,6 +178,7 @@ async function fetchSolanaData(address, startDate) {
     // Fetch token metadata for all mints
     let mintMetadata = {};
     let tokenPrices = {};
+    let tokenPriceChanges = {}; // Store price changes for P&L calculation
 
     if (mints.size > 0) {
       // Fetch metadata
@@ -184,45 +214,68 @@ async function fetchSolanaData(address, startDate) {
         tokenPrices['So11111111111111111111111111111111111111112'] = 200;
       }
 
-      // Fetch prices for other tokens from DexScreener (free, no auth)
+      // Fetch prices AND price changes for other tokens from DexScreener
       const mintArray = Array.from(mints).filter(m =>
         m !== 'So11111111111111111111111111111111111111112' &&
         m !== 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
       );
 
-      // DexScreener allows batch lookups
-      for (const mint of mintArray.slice(0, 20)) {
-        try {
-          const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
-          const dexData = await dexRes.json();
-          if (dexData.pairs && dexData.pairs.length > 0) {
-            // Get price from the most liquid pair
-            const topPair = dexData.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
-            if (topPair.priceUsd) {
-              tokenPrices[mint] = parseFloat(topPair.priceUsd);
+      console.log('Fetching DexScreener data for', mintArray.length, 'tokens...');
+
+      // DexScreener allows batch lookups - fetch in parallel batches of 5
+      const batchSize = 5;
+      for (let i = 0; i < Math.min(mintArray.length, 30); i += batchSize) {
+        const batch = mintArray.slice(i, i + batchSize);
+        const batchPromises = batch.map(async (mint) => {
+          try {
+            const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+            const dexData = await dexRes.json();
+            if (dexData.pairs && dexData.pairs.length > 0) {
+              // Get data from the most liquid Solana pair
+              const solanaPairs = dexData.pairs.filter(p => p.chainId === 'solana');
+              const topPair = (solanaPairs.length > 0 ? solanaPairs : dexData.pairs)
+                .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+              
+              if (topPair.priceUsd) {
+                tokenPrices[mint] = parseFloat(topPair.priceUsd);
+              }
+              
+              // Store price change data for P&L calculation
+              tokenPriceChanges[mint] = {
+                h24: topPair.priceChange?.h24 || 0,
+                h6: topPair.priceChange?.h6 || 0,
+                h1: topPair.priceChange?.h1 || 0,
+                m5: topPair.priceChange?.m5 || 0,
+              };
             }
+          } catch (dexErr) {
+            // Skip this token
           }
-        } catch (dexErr) {
-          // Skip this token
-        }
+        });
+        await Promise.all(batchPromises);
       }
 
-      console.log('Token prices fetched:', tokenPrices);
+      console.log('Token prices fetched:', Object.keys(tokenPrices).length);
+      console.log('Token price changes:', tokenPriceChanges);
     }
 
     tokenPrices['SOL'] = tokenPrices['So11111111111111111111111111111111111111112'] || 200;
 
     console.log('Mint to symbol map:', mintMetadata);
-    console.log('Token prices:', tokenPrices);
 
     // Filter by date
-    const startTimestamp = new Date(startDate).getTime() / 1000;
-    const filteredTxs = txArray.filter(
+    const filteredTxs = allTransactions.filter(
       tx => tx.timestamp >= startTimestamp
     );
     console.log('Filtered Solana transactions (2025):', filteredTxs.length);
 
-    return { transactions: filteredTxs, mintMetadata, tokenPrices, chain: 'SOL' };
+    return { 
+      transactions: filteredTxs, 
+      mintMetadata, 
+      tokenPrices, 
+      tokenPriceChanges,
+      chain: 'SOL' 
+    };
   } catch (err) {
     console.error('Helius API error:', err);
     return getMockSolData();
@@ -341,9 +394,19 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         if (monthIndex < 12) stats.monthlyActivity[monthIndex].txs++;
       }
 
-      // Process SWAP transactions - these are the key trades for P&L
-      if (tx.type === 'SWAP' && tx.tokenTransfers && tx.tokenTransfers.length > 0) {
+      // Process SWAP transactions from Jupiter, Raydium, and other DEXes
+      // Helius marks these as type: 'SWAP' but also check source for DEX-specific handling
+      const isSwap = tx.type === 'SWAP' || 
+                     tx.source === 'JUPITER' || 
+                     tx.source === 'RAYDIUM' ||
+                     tx.source === 'ORCA' ||
+                     tx.source === 'METEORA';
+      
+      if (isSwap && tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         stats.swapCount = (stats.swapCount || 0) + 1;
+        
+        // Log DEX source for debugging
+        console.log(`Processing ${tx.source || 'SWAP'} tx:`, tx.signature?.slice(0, 8));
 
         // In a swap, identify what we sent (sold) and what we received (bought)
         // The USD value comes from looking at the SOL/USDC side of the trade
