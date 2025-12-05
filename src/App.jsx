@@ -662,21 +662,36 @@ function calculateFinalStats(stats) {
   const peakDayIndex = dayCounts.indexOf(Math.max(...dayCounts));
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-  // Determine trading personality based on swap count
+  // Determine trading personality based on swap count AND average hold time
   const swapCount = stats.swapCount || 0;
+  
+  // Calculate average hold time across all tokens
+  const tokensWithHolds = tokenAnalysis.filter(t => t.holdTimeDays > 0 && t.symbol !== 'SOL' && t.symbol !== 'ETH');
+  const avgHoldTime = tokensWithHolds.length > 0 
+    ? tokensWithHolds.reduce((sum, t) => sum + t.holdTimeDays, 0) / tokensWithHolds.length 
+    : 0;
+  
   let personality, personalityDesc;
-  if (swapCount > 50) {
+  
+  // Murad Mode = long average hold times (30+ days average)
+  if (avgHoldTime >= 30) {
+    personality = 'Murad Mode';
+    personalityDesc = `${Math.round(avgHoldTime)} day avg hold. You believe in your picks.`;
+  } else if (swapCount > 200) {
     personality = 'Hyperactive Degen';
     personalityDesc = `${swapCount} swaps this year! You live for the pump.`;
-  } else if (swapCount > 20) {
+  } else if (swapCount > 100) {
     personality = 'Active Trader';
     personalityDesc = 'Regular swapper with a taste for alpha.';
-  } else if (swapCount > 5) {
+  } else if (swapCount > 50) {
     personality = 'Selective Sniper';
     personalityDesc = 'You pick your shots carefully. Quality over quantity.';
+  } else if (avgHoldTime >= 14) {
+    personality = 'Patient Holder';
+    personalityDesc = `${Math.round(avgHoldTime)} day avg hold. Patience pays off.`;
   } else {
-    personality = 'Diamond Hands';
-    personalityDesc = 'Holding strong. Few trades, maximum conviction.';
+    personality = 'Getting Started';
+    personalityDesc = 'Building your on-chain history. Keep going!';
   }
 
   // Calculate degen score
