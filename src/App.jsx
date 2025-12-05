@@ -485,6 +485,19 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
 
           // Skip stables - we only care about the meme coins
           if (symbol === 'USDC' || symbol === 'USDT' || symbol === 'SOL') return;
+          
+          // Skip tokens with no price data (likely spam/scam tokens)
+          if (price === 0) {
+            console.log('Skipping token with no price:', symbol);
+            return;
+          }
+          
+          // Skip if USD value is too small (dust)
+          const usdValue = amount * price;
+          if (usdValue < 0.01) {
+            console.log('Skipping dust amount:', symbol, usdValue);
+            return;
+          }
 
           if (!tokenTrades[symbol]) {
             tokenTrades[symbol] = {
@@ -615,6 +628,18 @@ function calculateFinalStats(stats) {
   // Analyze each token
   Object.entries(tokenTrades).forEach(([symbol, data]) => {
     if (symbol === 'USDC' || symbol === 'USDT') return; // Skip stables
+    
+    // Skip tokens with no price (spam tokens)
+    if (!data.currentPrice || data.currentPrice === 0) {
+      console.log('Skipping token with no price in analysis:', symbol);
+      return;
+    }
+    
+    // Skip tokens where total spent was less than $1 (dust/spam)
+    if ((data.totalSpentUsd || 0) < 1) {
+      console.log('Skipping low-value token:', symbol, data.totalSpentUsd);
+      return;
+    }
 
     const totalBought = data.totalBought || 0;
     const totalSold = data.totalSold || 0;
