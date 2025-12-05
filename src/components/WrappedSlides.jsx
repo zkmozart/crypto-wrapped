@@ -96,7 +96,7 @@ const createSlides = (data) => [
         <p className="text-blue-200 text-xl mb-2">Your comfort coin was</p>
         <h1 className="text-6xl font-black text-white mb-4">{data.mostTradedToken.symbol}</h1>
         <p className="text-blue-200 text-lg">
-          You interacted with it <span className="font-bold text-white">{data.mostTradedToken.count} times</span>
+          You held it for <span className="font-bold text-white">{data.mostTradedToken.count} days</span>
         </p>
       </div>
     ),

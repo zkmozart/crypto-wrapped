@@ -597,12 +597,12 @@ function calculateFinalStats(stats) {
       : 0;
 
     // Calculate ranking score based on user requirements:
-    // 1. Higher realized % gain = higher ranking
-    // 2. Longer hold time = higher ranking
-    // Normalize both to similar scales and combine
-    const realizedGainScore = realizedPnLPercent; // Can be negative or positive
-    const holdTimeScore = holdTimeDays * 0.5; // 0.5 points per day held
-    const rankingScore = realizedGainScore + holdTimeScore;
+    // 1. Longer hold time = MUCH higher ranking (primary factor)
+    // 2. Higher realized profit = higher ranking (secondary factor)
+    // Hold time is the primary driver - multiply by 10 to make it dominant
+    const holdTimeScore = holdTimeDays * 10; // 10 points per day held
+    const realizedGainScore = realizedPnLPercent > 0 ? realizedPnLPercent : 0; // Only positive gains help
+    const rankingScore = holdTimeScore + realizedGainScore;
 
     tokenAnalysis.push({
       symbol,
@@ -688,8 +688,21 @@ function calculateFinalStats(stats) {
     (peakHour >= 22 || peakHour <= 5 ? 15 : 0)
   ));
 
-  // Find most traded token (by trade count, excluding stables)
-  const mostTradedToken = rankedTokens[0] || { symbol: 'SOL', tradeCount: 0, volumeUsd: 0 };
+  // Find tokens with longest and shortest hold times (excluding SOL, ETH, stables)
+  const tokensWithHoldTime = tokenAnalysis.filter(t => 
+    t.holdTimeDays > 0 && 
+    t.heldSignificantValue && 
+    t.symbol !== 'SOL' && 
+    t.symbol !== 'ETH' &&
+    t.symbol !== 'USDC' &&
+    t.symbol !== 'USDT'
+  );
+  const sortedByHoldTime = [...tokensWithHoldTime].sort((a, b) => b.holdTimeDays - a.holdTimeDays);
+  const longestHoldToken = sortedByHoldTime[0];
+  const shortestHoldToken = sortedByHoldTime[sortedByHoldTime.length - 1];
+
+  // Comfort coin = longest held token (excluding gas tokens)
+  const comfortCoin = longestHoldToken || rankedTokens[0] || { symbol: 'N/A', tradeCount: 0, holdTimeDays: 0 };
 
   // Find best trade (highest % gain with at least $1 spent)
   const bestTrade = sortedByPnLPercent[0] || null;
@@ -701,17 +714,6 @@ function calculateFinalStats(stats) {
   const fallbackWorstTrade = worstTrade || [...tokenAnalysis]
     .filter(t => t.totalSpentUsd >= 1)
     .sort((a, b) => a.pnlPercent - b.pnlPercent)[0] || null;
-
-  // Find tokens with longest and shortest hold times (excluding SOL and ETH)
-  const tokensWithHoldTime = tokenAnalysis.filter(t => 
-    t.holdTimeDays > 0 && 
-    t.heldSignificantValue && 
-    t.symbol !== 'SOL' && 
-    t.symbol !== 'ETH'
-  );
-  const sortedByHoldTime = [...tokensWithHoldTime].sort((a, b) => b.holdTimeDays - a.holdTimeDays);
-  const longestHoldToken = sortedByHoldTime[0];
-  const shortestHoldToken = sortedByHoldTime[sortedByHoldTime.length - 1];
 
   console.log('Final stats calculation:', {
     rankedTokens,
@@ -730,9 +732,9 @@ function calculateFinalStats(stats) {
     totalVolume: Math.round(stats.totalVolume),
     gasSpent: Math.round(stats.gasSpent * 100) / 100,
     mostTradedToken: {
-      symbol: mostTradedToken.symbol,
-      count: mostTradedToken.tradeCount,
-      logo: tokenLogos[mostTradedToken.symbol] || '🪙',
+      symbol: comfortCoin.symbol,
+      count: comfortCoin.holdTimeDays,
+      logo: tokenLogos[comfortCoin.symbol] || '🪙',
     },
     topTokens: topTokens.map(t => ({
       symbol: t.symbol,
