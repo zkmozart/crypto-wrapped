@@ -448,6 +448,13 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
           });
         }
 
+        // IMPORTANT: Only process if this is a REAL swap (user sent something AND received something)
+        // This filters out airdrops and dust attacks
+        if (sentTransfers.length === 0 || receivedTransfers.length === 0) {
+          console.log('Skipping non-swap tx (no send/receive pair):', tx.signature?.slice(0, 8));
+          return; // Skip - not a real swap
+        }
+
         // Calculate USD value of the swap from the SOL/USDC side
         let swapUsdValue = 0;
         const stableMints = [
@@ -535,7 +542,8 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
         });
       }
 
-      // Process all token transfers for volume tracking AND token holding
+      // Process all token transfers for volume tracking only (NOT for hold time)
+      // Hold time is only tracked from actual DEX swaps above
       if (tx.tokenTransfers && tx.tokenTransfers.length > 0) {
         tx.tokenTransfers.forEach(transfer => {
           const symbol = getSymbol(transfer.mint);
@@ -551,72 +559,9 @@ function processWalletData(ethData, solData, ethAddress, solAddress) {
             } else if (price > 0) {
               stats.totalVolume += usdValue;
             }
-
-            // Track token holdings for ALL transfers (not just SWAPs)
-            // This ensures we capture tokens from any source
-            if (symbol !== 'USDC' && symbol !== 'USDT' && symbol !== 'SOL') {
-              if (!tokenTrades[symbol]) {
-                tokenTrades[symbol] = {
-                  trades: [],
-                  mint: transfer.mint,
-                  currentPrice: price,
-                  totalBought: 0,
-                  totalSold: 0,
-                  totalSpentUsd: 0,
-                  totalReceivedUsd: 0,
-                  firstBuyTime: null,
-                  lastSellTime: null,
-                  holdingBalance: 0,
-                };
-              }
-
-              tokenTrades[symbol].currentPrice = price;
-
-              // Received tokens = acquired (BUY or airdrop or transfer in)
-              if (transfer.toUserAccount === walletAddress) {
-                // Only add if not already tracked from SWAP processing
-                const existingTrade = tokenTrades[symbol].trades.find(
-                  t => t.timestamp === txTimestamp && t.type === 'buy' && t.amount === amount
-                );
-                
-                if (!existingTrade) {
-                  tokenTrades[symbol].trades.push({
-                    type: 'buy',
-                    amount,
-                    usdValue: usdValue,
-                    timestamp: txTimestamp
-                  });
-                  tokenTrades[symbol].totalBought += amount;
-                  tokenTrades[symbol].totalSpentUsd += usdValue;
-                  tokenTrades[symbol].holdingBalance += amount;
-
-                  if (!tokenTrades[symbol].firstBuyTime) {
-                    tokenTrades[symbol].firstBuyTime = txTimestamp;
-                  }
-                }
-              }
-
-              // Sent tokens = disposed (SELL or transfer out)
-              if (transfer.fromUserAccount === walletAddress) {
-                // Only add if not already tracked from SWAP processing
-                const existingTrade = tokenTrades[symbol].trades.find(
-                  t => t.timestamp === txTimestamp && t.type === 'sell' && t.amount === amount
-                );
-                
-                if (!existingTrade) {
-                  tokenTrades[symbol].trades.push({
-                    type: 'sell',
-                    amount,
-                    usdValue: usdValue,
-                    timestamp: txTimestamp
-                  });
-                  tokenTrades[symbol].totalSold += amount;
-                  tokenTrades[symbol].totalReceivedUsd += usdValue;
-                  tokenTrades[symbol].holdingBalance -= amount;
-                  tokenTrades[symbol].lastSellTime = txTimestamp;
-                }
-              }
-            }
+            
+            // DO NOT track token holdings here - only from actual swaps
+            // This prevents airdrops and dust attacks from being counted
           }
         });
       }
